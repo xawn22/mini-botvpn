@@ -1,0 +1,12 @@
+[Unit]
+Description=Manager BOTVPN
+After=network.target
+
+[Service]
+WorkingDirectory=/etc/conf
+ExecStart=/usr/bin/python3 /etc/conf/botvpn.py
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
