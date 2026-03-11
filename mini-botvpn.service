@@ -1,12 +1,15 @@
 [Unit]
-Description=Manager BOTVPN
+Description=Telegram Mini VPN Bot
 After=network.target
 
 [Service]
 WorkingDirectory=/etc/conf
-ExecStart=/usr/bin/python3 /etc/conf/botvpn.py
+ExecStart=/usr/bin/python3 /etc/conf/main.py
 Restart=always
+RestartSec=10
 User=root
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

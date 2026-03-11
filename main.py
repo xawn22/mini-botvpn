@@ -6,6 +6,7 @@ Version: 3.0 - Config from JSON
 """
 
 import subprocess
+import asyncio
 import json
 import re
 import os
@@ -74,42 +75,57 @@ def generate_password(length=8):
     chars = string.ascii_letters + string.digits
     return ''.join(random.choice(chars) for _ in range(length))
 
-def call_script(script_path, args_list):
+
+async def call_script_async(script_path, args_list):
+    """Jalankan script shell secara async tanpa blocking bot"""
     try:
-        logger.info(f"Running: {script_path} {' '.join(args_list)}")
-        
-        result = subprocess.run(
-            [script_path] + args_list,
-            capture_output=True,
-            text=True,
-            timeout=30
+        process = await asyncio.create_subprocess_exec(
+            script_path, *args_list,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
-        
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return {"status": "error", "message": "Script timeout"}
+
+        stdout = stdout.decode()
         json_pattern = r'(\{.*\})'
-        match = re.search(json_pattern, result.stdout, re.DOTALL)
+        match = re.search(json_pattern, stdout, re.DOTALL)
         if match:
             return json.loads(match.group(1))
         else:
             return {"status": "error", "message": "Script tidak mengembalikan JSON"}
-            
+
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logging.error(f"Error call_script_async: {e}")
         return {"status": "error", "message": str(e)}
+		
 
 # ==========================================
-# ERROR HANDLER
+# ERROR HANDLER (UPDATE)
 # ==========================================
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
-    logger.error(f"Update {update} caused error {context.error}")
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            "❌ <b>Terjadi kesalahan internal.</b>\nSilakan coba lagi.",
-            parse_mode='HTML'
-        )
-
+    try:
+        logger.error(f"Update {update} caused error {context.error}")
+        
+        # Log detail error
+        import traceback
+        traceback.print_exc()
+        
+        # Kasih tahu user kalau error
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Terjadi kesalahan internal.\nSilakan coba lagi."
+            )
+    except:
+        pass
+		
 # ==========================================
-# HANDLER START
+# HANDLER START (VERSI BARU - LANGSUNG TAMPIL STATUS + NOMOR URUT)
 # ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -118,7 +134,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Kamu tidak diizinkan menggunakan bot ini.")
         return ConversationHandler.END
     
-    # Buat tombol protokol + tombol status
+    # Loading message
+    loading = await update.message.reply_text("⏱️ Memuat data...")
+    
+    # Ambil semua data
+    counts = await get_account_counts()
+    expired_today, expired_soon = await check_expired_users()
+    server_info = await get_server_info()
+    
+    # Cek script status
+    scripts_ok = 0
+    scripts_total = len(SCRIPTS)
+    for proto, script in SCRIPTS.items():
+        if os.path.exists(script):
+            scripts_ok += 1
+    
+    # Buat tampilan status
+    status_text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "┃      🤖 𝗔𝘂𝘁𝗼𝗦𝗰𝗿𝗶𝗽𝘁 𝗔𝗜𝗢 𝗩.1     ┃\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        
+        "📦 JUMLAH AKUN\n"
+        "──────────────────\n"
+        f"🔰 SSH      : {counts['ssh']} Akun\n"
+        f"🚀 VMess   : {counts['vmess']} Akun\n"
+        f"📡 VLess    : {counts['vless']} Akun\n"
+        f"🛡️ Trojan   : {counts['trojan']} Akun\n\n"
+    )
+    
+    # EXPIRED HARI INI (DENGAN NOMOR URUT)
+    if expired_today:
+        status_text += "⚠️ Expired Hari Ini:\n"
+        status_text += "──────────────────\n"
+        for i, (proto, user, days, status) in enumerate(expired_today, 1):
+            status_text += f"{i}. {user} - {proto} - {status}\n"
+        status_text += "\n"
+    else:
+        status_text += "⚠️ Expired Hari Ini:\n"
+        status_text += "──────────────────\n"
+        status_text += "• Tidak ada\n\n"
+    
+    # EXPIRED 7 HARI LAGI (DENGAN NOMOR URUT)
+    if expired_soon:
+        status_text += "⏳ Expired Mendatang:\n"
+        status_text += "──────────────────\n"
+        for i, (proto, user, days, text) in enumerate(expired_soon, 1):
+            status_text += f"{i}. {user} - {proto} - {text}\n"
+        status_text += "\n"
+    else:
+        status_text += "⏳ Expired Mendatang:\n"
+        status_text += "──────────────────\n"
+        status_text += "• Tidak ada\n\n"
+    
+    # SERVER INFO
+    status_text += (
+        "🖥️ SERVER INFO\n"
+        "──────────────────\n"
+        f"⏰ Uptime    : {server_info['uptime']}\n"
+        f"💾 RAM       : {server_info['ram']}\n"
+        f"💿 Disk      : {server_info['disk']}\n"
+        f"✅ Script    : {scripts_ok}/{scripts_total} Aktif\n\n"
+        
+        "👤 USER\n"
+        "──────────────────\n"
+        f"🆔 ID       : {user_id}\n"
+    )
+    
+    # Hapus loading message
+    await loading.delete()
+    
+    # Buat tombol protokol
     keyboard = [
         [
             InlineKeyboardButton("⚡ SSH", callback_data='proto_ssh'),
@@ -128,14 +214,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📡 VLess", callback_data='proto_vless'),
             InlineKeyboardButton("🛡️ Trojan", callback_data='proto_trojan'),
         ],
-        [InlineKeyboardButton("📊 Status Bot", callback_data='menu_status')],
         [InlineKeyboardButton("❌ Batal", callback_data='proto_batal')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # Kirim pesan (status + menu)
     await update.message.reply_text(
-        "🚀 <b>Pilih Protokol yang Ingin Dibuat:</b>\n\n"
-        "Klik tombol di bawah untuk memilih:",
+        f"{status_text}\n\n🚀 <b>Pilih Protokol yang Ingin Dibuat:</b>",
         parse_mode='HTML',
         reply_markup=reply_markup
     )
@@ -171,84 +256,286 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>{proto_names[protocol]}</b>\n\n"
         f"📝 Masukkan data dalam format:\n"
         f"<code>username hari quota iplimit</code>\n\n"
-        f"Contoh: <code>paijo 30 10 3</code>\n\n"
+        f"Contoh: <code>myname 1 1 1</code>\n\n"
         f"Keterangan:\n"
         f"• username: huruf/angka/_\n"
         f"• hari: 1-365\n"
         f"• quota: 0-999 GB (0 = unlimited)\n"
         f"• iplimit: 0-100 IP (0 = unlimited)\n\n"
+		f"• untuk ssh support custom pw\n\n"
         f"Ketik /batal untuk membatalkan.",
         parse_mode='HTML'
     )
     
     return INPUT_DATA
+	
 
 # ==========================================
-# HANDLER MENU STATUS
+# FUNGSI AMBIL JUMLAH AKUN (FIX ERROR HANDLING)
 # ==========================================
-async def menu_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk tombol Status"""
-    query = update.callback_query
-    await query.answer()
+async def get_account_counts():
+    """Ambil semua jumlah akun sekaligus dari total-client.sh"""
+    # GANTI PATH INI SESUAI LOKASI SCRIPT KAMU!
+    script_path = "/etc/conf/server.sh"  # <-- Sesuaikan!
     
-    user_id = update.effective_user.id
+    default_counts = {
+        'ssh': '0',
+        'vmess': '0', 
+        'vless': '0',
+        'trojan': '0',
+        'shadowsocks': '0',
+        'total': '0'
+    }
     
-    status_text = "<b>📊 STATUS BOT</b>\n\n"
-    
-    for proto, script in SCRIPTS.items():
-        if os.path.exists(script):
-            status_text += f"✅ {proto.upper()}: <code>{script}</code> (OK)\n"
-        else:
-            status_text += f"❌ {proto.upper()}: <code>{script}</code> (TIDAK DITEMUKAN)\n"
-    
-    status_text += f"\n👤 User ID: <code>{user_id}</code>"
-    
-    # Tombol kembali ke menu
-    keyboard = [[InlineKeyboardButton("🔙 Kembali ke Menu", callback_data='kembali_ke_menu')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        status_text,
-        parse_mode='HTML',
-        reply_markup=reply_markup
-    )
-    
-    return PROTOKOL
+    try:
+        if not os.path.exists(script_path):
+            print(f"❌ Script tidak ditemukan: {script_path}")
+            return default_counts
+        
+        # Jalankan script bash
+        process = await asyncio.create_subprocess_exec(
+            "bash", script_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return default_counts
+        
+        # Parse output
+        stdout_str = stdout.decode('utf-8', errors='ignore').strip()
+        
+        # Cari JSON
+        json_pattern = r'(\{.*\})'
+        match = re.search(json_pattern, stdout_str, re.DOTALL)
+        
+        if match:
+            json_str = match.group(1)
+            try:
+                data = json.loads(json_str)
+                return {
+                    'ssh': str(data.get('ssh', '0')),
+                    'vmess': str(data.get('vmess', '0')),
+                    'vless': str(data.get('vless', '0')),
+                    'trojan': str(data.get('trojan', '0')),
+                    'shadowsocks': str(data.get('shadowsocks', '0')),
+                    'total': str(data.get('total', '0'))
+                }
+            except:
+                return default_counts
+        
+        return default_counts
+        
+    except Exception as e:
+        print(f"Error di get_account_counts: {e}")
+        return default_counts
 
-# ==========================================
-# HANDLER KEMBALI KE MENU
-# ==========================================
-async def kembali_ke_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler untuk tombol Kembali ke Menu"""
-    query = update.callback_query
-    await query.answer()
-    
-    # Tampilkan menu utama
-    keyboard = [
-        [
-            InlineKeyboardButton("⚡ SSH", callback_data='proto_ssh'),
-            InlineKeyboardButton("🚀 VMess", callback_data='proto_vmess'),
-        ],
-        [
-            InlineKeyboardButton("📡 VLess", callback_data='proto_vless'),
-            InlineKeyboardButton("🛡️ Trojan", callback_data='proto_trojan'),
-        ],
-        [InlineKeyboardButton("📊 Status Bot", callback_data='menu_status')],
-        [InlineKeyboardButton("❌ Batal", callback_data='proto_batal')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "🚀 <b>Pilih Protokol yang Ingin Dibuat:</b>\n\n"
-        "Klik tombol di bawah untuk memilih:",
-        parse_mode='HTML',
-        reply_markup=reply_markup
-    )
-    
-    return PROTOKOL
 
+
+async def get_server_info():
+    """Ambil info server: uptime, RAM, disk"""
+    
+    info = {
+        'uptime': 'N/A',
+        'ram': 'N/A',
+        'disk': 'N/A'
+    }
+    
+    try:
+        # UPTIME
+        uptime_proc = await asyncio.create_subprocess_exec(
+            "uptime", "-p",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await uptime_proc.communicate()
+        uptime_str = stdout.decode().strip().replace('up ', '')
+        info['uptime'] = uptime_str if uptime_str else 'N/A'
+        
+        # RAM USAGE
+        ram_proc = await asyncio.create_subprocess_exec(
+            "free", "-h",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await ram_proc.communicate()
+        ram_lines = stdout.decode().split('\n')
+        if len(ram_lines) > 1:
+            ram_parts = ram_lines[1].split()
+            if len(ram_parts) >= 3:
+                info['ram'] = f"{ram_parts[2]}/{ram_parts[1]}"
+        
+        # DISK USAGE
+        disk_proc = await asyncio.create_subprocess_exec(
+            "df", "-h", "/",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await disk_proc.communicate()
+        disk_lines = stdout.decode().split('\n')
+        if len(disk_lines) > 1:
+            disk_parts = disk_lines[1].split()
+            if len(disk_parts) >= 5:
+                info['disk'] = f"{disk_parts[2]}/{disk_parts[1]} ({disk_parts[4]})"
+        
+    except Exception as e:
+        print(f"Error get server info: {e}")
+    
+    return info
+	
+	
+async def check_expired_users():
+    """Cek user expired untuk semua protokol sesuai format config.json - ANTI DUPLIKAT + NOMOR URUT"""
+    
+    expired_today = []
+    expired_soon = []
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # BUAT SET UNTUK ANTI DUPLIKAT
+    processed_users = set()
+    
+    # 1. CEK SSH
+    ssh_db = "/etc/ssh/.ssh.db"
+    if os.path.exists(ssh_db):
+        try:
+            with open(ssh_db, 'r') as f:
+                for line in f:
+                    if line.startswith('#ssh#'):
+                        parts = line.strip().split()
+                        if len(parts) >= 8:
+                            user = parts[1]
+                            
+                            # ANTI DUPLIKAT SSH
+                            user_key = f"ssh_{user}"
+                            if user_key in processed_users:
+                                continue
+                            processed_users.add(user_key)
+                            
+                            try:
+                                day = parts[5]
+                                month = parts[6]
+                                year = parts[7]
+                                exp_str = f"{day} {month} {year}"
+                                exp_date = datetime.strptime(exp_str, '%d %b %Y')
+                                exp_date = exp_date.replace(hour=0, minute=0, second=0)
+                                
+                                diff_days = (exp_date - today).days
+                                
+                                if diff_days < 0:
+                                    expired_today.append(("SSH", user, diff_days, "EXPIRED"))
+                                elif diff_days == 0:
+                                    expired_today.append(("SSH", user, diff_days, "HARI INI"))
+                                elif diff_days <= 7:
+                                    expired_soon.append(("SSH", user, diff_days, f"{diff_days} hari"))
+                            except:
+                                pass
+        except:
+            pass
+    
+
+    xray_config = "/etc/xray/config.json"
+    if os.path.exists(xray_config):
+        try:
+            with open(xray_config, 'r') as f:
+                lines = f.readlines()
+            
+            for line in lines:
+                line = line.strip()
+                
+                # CEK VLESS (pattern: #& username YYYY-MM-DD)
+                if '#&' in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        username = parts[1]
+                        exp_str = parts[2]
+                        
+                        # ANTI DUPLIKAT VLESS
+                        user_key = f"vless_{username}"
+                        if user_key in processed_users:
+                            continue
+                        processed_users.add(user_key)
+                        
+                        try:
+                            exp_date = datetime.strptime(exp_str, '%Y-%m-%d')
+                            exp_date = exp_date.replace(hour=0, minute=0, second=0)
+                            
+                            diff_days = (exp_date - today).days
+                            
+                            if diff_days < 0:
+                                expired_today.append(("VLess", username, diff_days, "EXPIRED"))
+                            elif diff_days == 0:
+                                expired_today.append(("VLess", username, diff_days, "HARI INI"))
+                            elif diff_days <= 7:
+                                expired_soon.append(("VLess", username, diff_days, f"{diff_days} hari"))
+                        except:
+                            pass
+                
+                # CEK VMESS (pattern: ### username YYYY-MM-DD)
+                if '###' in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        username = parts[1]
+                        exp_str = parts[2]
+                        
+                        # ANTI DUPLIKAT VMESS
+                        user_key = f"vmess_{username}"
+                        if user_key in processed_users:
+                            continue
+                        processed_users.add(user_key)
+                        
+                        try:
+                            exp_date = datetime.strptime(exp_str, '%Y-%m-%d')
+                            exp_date = exp_date.replace(hour=0, minute=0, second=0)
+                            
+                            diff_days = (exp_date - today).days
+                            
+                            if diff_days < 0:
+                                expired_today.append(("VMess", username, diff_days, "EXPIRED"))
+                            elif diff_days == 0:
+                                expired_today.append(("VMess", username, diff_days, "HARI INI"))
+                            elif diff_days <= 7:
+                                expired_soon.append(("VMess", username, diff_days, f"{diff_days} hari"))
+                        except:
+                            pass
+                
+                # CEK TROJAN (pattern: #! username YYYY-MM-DD)
+                if '#!' in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        username = parts[1]
+                        exp_str = parts[2]
+                        
+                        # ANTI DUPLIKAT TROJAN
+                        user_key = f"trojan_{username}"
+                        if user_key in processed_users:
+                            continue
+                        processed_users.add(user_key)
+                        
+                        try:
+                            exp_date = datetime.strptime(exp_str, '%Y-%m-%d')
+                            exp_date = exp_date.replace(hour=0, minute=0, second=0)
+                            
+                            diff_days = (exp_date - today).days
+                            
+                            if diff_days < 0:
+                                expired_today.append(("Trojan", username, diff_days, "EXPIRED"))
+                            elif diff_days == 0:
+                                expired_today.append(("Trojan", username, diff_days, "HARI INI"))
+                            elif diff_days <= 7:
+                                expired_soon.append(("Trojan", username, diff_days, f"{diff_days} hari"))
+                        except:
+                            pass
+                            
+        except Exception as e:
+            print(f"Error baca config.json: {e}")
+    
+    return expired_today, expired_soon
 # ==========================================
-# HANDLER INPUT DATA
+# HANDLER INPUT DATA (VERSI BARU - 5 PARAMETER)
 # ==========================================
 async def input_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -267,16 +554,46 @@ async def input_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     parts = text.split()
     
-    if len(parts) != 4:
-        await update.message.reply_text(
-            "❌ <b>Format harus:</b> <code>username hari quota iplimit</code>\n"
-            "Contoh: <code>paijo 30 10 3</code>\n\n"
-            "Silakan coba lagi:",
-            parse_mode='HTML'
-        )
-        return INPUT_DATA
+    # CEK JUMLAH PARAMETER (SEKARANG 5 UNTUK SSH, 4 UNTUK LAINNYA)
+    if protocol == 'ssh':
+        if len(parts) != 5:
+            await update.message.reply_text(
+                "❌ <b>Format SSH harus:</b> <code>username password hari quota iplimit</code>\n"
+                "Contoh: <code>paijo rahasia123 30 10 3</code>\n\n"
+                "Keterangan:\n"
+                "• username: huruf/angka/_\n"
+                "• password: minimal 3 karakter (tanpa spasi)\n"
+                "• hari: 1-365\n"
+                "• quota: 0-999 GB (0 = unlimited)\n"
+                "• iplimit: 0-100 IP (0 = unlimited)\n\n"
+                "Ketik /batal untuk membatalkan.",
+                parse_mode='HTML'
+            )
+            return INPUT_DATA
+    else:
+        if len(parts) != 4:
+            await update.message.reply_text(
+                "❌ <b>Format SSH harus:</b> <code>username password hari quota iplimit</code>\n"
+                "Contoh: <code>paijo rahasia123 30 10 3</code>\n\n"
+                "Keterangan:\n"
+                "• username: huruf/angka/_\n"
+                "• password: minimal 3 karakter (tanpa spasi)\n"
+                "• hari: 1-365\n"
+                "• quota: 0-999 GB (0 = unlimited)\n"
+                "• iplimit: 0-100 IP (0 = unlimited)\n\n"
+                "Ketik /batal untuk membatalkan.",
+                parse_mode='HTML'
+            )
+            return INPUT_DATA
     
-    username, days, quota, iplimit = parts
+    # PARSING SESUAI PROTOCOL
+    if protocol == 'ssh':
+        # SSH: username, password, hari, quota, iplimit
+        username, password, days, quota, iplimit = parts
+    else:
+        # VMess/VLess/Trojan: username, hari, quota, iplimit
+        username, days, quota, iplimit = parts
+        password = None  # Tidak dipakai untuk selain SSH
     
     # Validasi username
     if not validate_username(username):
@@ -287,6 +604,25 @@ async def input_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         return INPUT_DATA
+    
+    # VALIDASI PASSWORD (khusus SSH)
+    if protocol == 'ssh':
+        if len(password) < 3:
+            await update.message.reply_text(
+                "❌ <b>Password terlalu pendek.</b>\n"
+                "Minimal 3 karakter.\n\n"
+                "Silakan coba lagi:",
+                parse_mode='HTML'
+            )
+            return INPUT_DATA
+        
+        if ' ' in password:
+            await update.message.reply_text(
+                "❌ <b>Password tidak boleh mengandung spasi.</b>\n\n"
+                "Silakan coba lagi:",
+                parse_mode='HTML'
+            )
+            return INPUT_DATA
     
     # Validasi angka
     if not validate_number(days, 1, 365):
@@ -310,7 +646,7 @@ async def input_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return INPUT_DATA
     
-    # Konversi
+    # Konversi ke integer
     days = int(days)
     quota = int(quota)
     iplimit = int(iplimit)
@@ -318,17 +654,26 @@ async def input_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Progress message
     progress = await update.message.reply_text(f"⏱️ Membuat akun {protocol.upper()}...")
     
-    # Siapkan parameter
+    # Siapkan parameter sesuai protocol
     script_path = SCRIPTS[protocol]
     
     if protocol == 'ssh':
-        password = generate_password()
+        # SSH: username, password, quota, iplimit, days
         args_list = [username, password, str(quota), str(iplimit), str(days)]
+    elif protocol == 'vmess':
+        # VMess: username, days, quota, iplimit
+        args_list = [username, str(days), str(quota), str(iplimit)]
+    elif protocol == 'vless':
+        # VLess: username, days, quota, iplimit
+        args_list = [username, str(days), str(quota), str(iplimit)]
+    elif protocol == 'trojan':
+        # Trojan: username, days, quota, iplimit
+        args_list = [username, str(days), str(quota), str(iplimit)]
     else:
         args_list = [username, str(days), str(quota), str(iplimit)]
     
     # Panggil script
-    result = call_script(script_path, args_list)
+    result = await call_script_async(script_path, args_list)
     
     await progress.delete()
     
@@ -587,8 +932,6 @@ def main():
         states={
             PROTOKOL: [
                 CallbackQueryHandler(button_handler, pattern='^proto_'),
-                CallbackQueryHandler(menu_status, pattern='^menu_status$'),
-                CallbackQueryHandler(kembali_ke_menu, pattern='^kembali_ke_menu$'),
             ],
             INPUT_DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_data)],
         },
@@ -602,7 +945,7 @@ def main():
     app.add_handler(CommandHandler("status", status_command))
     
     print("✅ Bot siap! Klik /start untuk memulai")
-    app.run_polling()
+    app.run_polling(timeout=30, read_timeout=30)
 
 if __name__ == "__main__":
     main()
