@@ -1,1 +1,1 @@
-# Compatible For AutoScript AIO V.1
+Panel For AutoScript AIO V.1
