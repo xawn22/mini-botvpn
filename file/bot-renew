@@ -7,7 +7,7 @@
 # ==========================================
 # KONFIGURASI
 # ==========================================
-CONFIG_FILE="/root/config.json"
+CONFIG_FILE="/etc/conf/config.json"
 DB_PATH="/etc/conf/bot.db"
 LOG_FILE="/var/log/auto-renew-executor.log"
 
