@@ -1,0 +1,411 @@
+#!/bin/bash
+#=====================================
+#   AUTO DELETE TRIAL EXPIRED - FINAL VERSION
+#   Jalan setiap 5 menit via cronjob
+#   VERSI: LENGKAP & SEMPURNA
+#   Include: Hapus semua file terkait + detail
+#=====================================
+
+# ==========================================
+# KONFIGURASI AWAL (PENTING UNTUK CRON)
+# ==========================================
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# Working directory
+cd /root || exit 1
+
+# ==========================================
+# KONFIGURASI
+# ==========================================
+DB_PATH="/etc/conf/bot.db"
+LOG_FILE="/var/log/auto-delete-trial.log"
+CONFIG_FILE="/etc/conf/config.json"
+
+# Warna output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# ==========================================
+# FUNGSI LOGGING
+# ==========================================
+log() {
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a $LOG_FILE
+}
+
+# ==========================================
+# FUNGSI VALIDASI USERNAME (PROTEKSI KETAT!)
+# ==========================================
+is_safe_username() {
+    local username="$1"
+    
+    # CEK 1: Tidak boleh kosong
+    if [ -z "$username" ]; then
+        return 1
+    fi
+    
+    # CEK 2: HARUS diawali "trial_" (proteksi utama!)
+    if [[ "$username" != trial_* ]]; then
+        return 1
+    fi
+    
+    # CEK 3: Hanya huruf kecil, angka, underscore
+    if ! [[ "$username" =~ ^[a-z0-9_]+$ ]]; then
+        return 1
+    fi
+    
+    # CEK 4: Panjang minimal 7 karakter (trial_ + 2)
+    if [ ${#username} -lt 7 ]; then
+        return 1
+    fi
+    
+    # CEK 5: Bukan user sistem (daftar hitam)
+    local dangerous_users=("root" "admin" "nobody" "daemon" "bin" "sys" "sync" "mail" "www-data" "mysql" "postgres" "ubuntu" "debian" "centos" "vps")
+    for dangerous in "${dangerous_users[@]}"; do
+        if [ "$username" == "$dangerous" ]; then
+            return 1
+        fi
+    done
+    
+    # CEK 6: Untuk SSH, cek UID (harus > 1000)
+    if id "$username" &>/dev/null; then
+        local uid=$(id -u "$username")
+        if [ "$uid" -lt 1000 ]; then
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# ==========================================
+# FUNGSI SENSOR USERNAME UNTUK LOG
+# ==========================================
+sensor_username() {
+    local username="$1"
+    echo "${username:0:4}***"
+}
+
+# ==========================================
+# FUNGSI KIRIM NOTIFIKASI KE OWNER
+# ==========================================
+send_notification() {
+    local deleted_count="$1"
+    local deleted_list="$2"
+    
+    if [ $deleted_count -eq 0 ]; then
+        return
+    fi
+    
+    # Baca config
+    if [ ! -f "$CONFIG_FILE" ]; then
+        return
+    fi
+    
+    BOT_TOKEN=$(grep -o '"token": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+    OWNER_ID=$(grep -o '"owner_id": *[0-9]*' "$CONFIG_FILE" | grep -o '[0-9]*')
+    
+    if [ -z "$OWNER_ID" ]; then
+        OWNER_ID=$(grep -o '"admin_ids": *\[[0-9,]*\]' "$CONFIG_FILE" | grep -o '[0-9]*' | head -1)
+    fi
+    
+    if [ -z "$BOT_TOKEN" ] || [ -z "$OWNER_ID" ]; then
+        return
+    fi
+    
+    local text="🧹 <b>AUTO DELETE TRIAL</b>%0A%0A"
+    text+="⏰ Waktu: $(date '+%d/%m/%Y %H:%M')%0A"
+    text+="━━━━━━━━━━━━━━━━━━━━%0A%0A"
+    text+="✅ <b>Akun trial expired dihapus:</b>%0A"
+    text+="$deleted_list%0A"
+    text+="━━━━━━━━━━━━━━━━━━━━%0A"
+    text+="Total: $deleted_count akun%0A"
+    
+    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+        -d chat_id="$OWNER_ID" \
+        -d text="$text" \
+        -d parse_mode="HTML" > /dev/null
+    
+    log "✅ Notifikasi terkirim ke owner"
+}
+
+# ==========================================
+# FUNGSI HAPUS SEMUA FILE TERKAIT (LENGKAP!)
+# ==========================================
+delete_all_related_files() {
+    local username="$1"
+    local protocol="$2"
+    
+    log "  🧹 Membersihkan semua jejak $username..."
+    
+    # [1] FILE LIMIT IP
+    rm -f /etc/limit/ssh/ip/$username 2>/dev/null
+    rm -f /etc/limit/vmess/ip/$username 2>/dev/null
+    rm -f /etc/limit/vless/ip/$username 2>/dev/null
+    rm -f /etc/limit/trojan/ip/$username 2>/dev/null
+    
+    # [2] FILE KONFIGURASI PER-USER
+    rm -f /etc/ssh/$username 2>/dev/null
+    rm -f /etc/vmess/$username 2>/dev/null
+    rm -f /etc/vless/$username 2>/dev/null
+    rm -f /etc/trojan/$username 2>/dev/null
+    
+    # [3] FILE DETAIL (YANG ANDA MINTA!)
+    rm -f /detail/ssh/$username.txt 2>/dev/null
+    rm -f /detail/vmess/$username.txt 2>/dev/null
+    rm -f /detail/vless/$username.txt 2>/dev/null
+    rm -f /detail/trojan/$username.txt 2>/dev/null
+    
+    # [4] FILE LOG
+    rm -f /var/log/xray/access-$username.log 2>/dev/null
+    rm -f /var/log/$username.log 2>/dev/null
+    rm -f /var/log/ssh/$username.log 2>/dev/null
+    
+    # [5] FILE TEMPORARY
+    rm -f /tmp/$username* 2>/dev/null
+    
+    # [6] HOME DIRECTORY (jika ada)
+    if [ -d "/home/$username" ]; then
+        rm -rf "/home/$username" 2>/dev/null
+    fi
+    
+    # [7] HAPUS DIREKTORI DETAIL JIKA KOSONG
+    for dir in ssh vmess vless trojan; do
+        if [ -d "/detail/$dir" ] && [ -z "$(ls -A /detail/$dir 2>/dev/null)" ]; then
+            rmdir "/detail/$dir" 2>/dev/null
+            log "  📁 Direktori /detail/$dir dihapus (kosong)"
+        fi
+    done
+    
+    log "  ✅ Semua file $username telah dihapus"
+}
+
+# ==========================================
+# FUNGSI HAPUS AKUN SSH
+# ==========================================
+delete_ssh() {
+    local username=$1
+    
+    if ! is_safe_username "$username"; then
+        log "  ❌ SAFETY: Username $username tidak aman - SKIP!"
+        return 1
+    fi
+    
+    if id "$username" &>/dev/null; then
+        log "  🔪 Membunuh proses user $username"
+        pkill -u "$username" 2>/dev/null
+        sleep 1
+        
+        log "  🗑️ Menghapus user SSH: $username"
+        userdel -f "$username" 2>/dev/null
+        
+        # Hapus dari file system
+        sed -i "/^$username:/d" /etc/passwd 2>/dev/null
+        sed -i "/^$username:/d" /etc/shadow 2>/dev/null
+        sed -i "/^$username:/d" /etc/group 2>/dev/null
+        
+        log "  ✅ SSH user $username dihapus"
+        return 0
+    else
+        log "  ⚠️ User $username sudah tidak ada di sistem"
+        return 0
+    fi
+}
+
+# ==========================================
+# FUNGSI HAPUS AKUN XRAY
+# ==========================================
+delete_xray() {
+    local protocol=$1
+    local username=$2
+    
+    if ! is_safe_username "$username"; then
+        log "  ❌ SAFETY: Username $username tidak aman - SKIP!"
+        return 1
+    fi
+    
+    # Tentukan pattern
+    case $protocol in
+        vmess) pattern="###" ;;
+        vless) pattern="#&" ;;
+        trojan) pattern="#!" ;;
+        *) 
+            log "  ❌ Protocol tidak dikenal: $protocol"
+            return 1 
+            ;;
+    esac
+    
+    log "  🗑️ Menghapus $protocol: $username"
+    
+    if [ ! -f "/etc/xray/config.json" ]; then
+        log "  ⚠️ File /etc/xray/config.json tidak ditemukan"
+        return 0
+    fi
+    
+    # Backup config sebelum diubah (opsional)
+    cp /etc/xray/config.json /etc/xray/config.json.backup 2>/dev/null
+    
+    # Hapus baris yang mengandung username (dengan spasi setelah username)
+    sed -i "/$pattern $username /d" /etc/xray/config.json
+    
+    # Verifikasi
+    if grep -q "$pattern $username " /etc/xray/config.json; then
+        log "  ❌ Gagal menghapus $username dari config.json"
+        return 1
+    fi
+    
+    log "  ✅ $protocol user $username dihapus dari config.json"
+    return 0
+}
+
+# ==========================================
+# CEK FILE DAN DIREKTORI SEBELUM MULAI
+# ==========================================
+pre_flight_check() {
+    log "${BLUE}🔍 Pre-flight check...${NC}"
+    
+    # Cek database
+    if [ ! -f "$DB_PATH" ]; then
+        log "${RED}❌ Database tidak ditemukan: $DB_PATH${NC}"
+        exit 1
+    fi
+    
+    # Cek sqlite3
+    if ! command -v sqlite3 &>/dev/null; then
+        log "${RED}❌ sqlite3 tidak ditemukan di PATH${NC}"
+        exit 1
+    fi
+    
+    # Cek akses database
+    if ! sqlite3 "$DB_PATH" "SELECT 1;" &>/dev/null; then
+        log "${RED}❌ Tidak bisa membaca database${NC}"
+        exit 1
+    fi
+    
+    # Buat direktori detail jika belum ada (tapi jangan buat jika belum ada)
+    # Ini hanya untuk memastikan tidak error saat hapus
+    mkdir -p /detail/ssh /detail/vmess /detail/vless /detail/trojan 2>/dev/null
+    
+    log "${GREEN}✅ Pre-flight check passed${NC}"
+}
+
+# ==========================================
+# MULAI
+# ==========================================
+log "${GREEN}========== AUTO DELETE TRIAL ==========${NC}"
+log "📅 Waktu system: $(date)"
+log "📅 Waktu local: $(date +'%Y-%m-%d %H:%M:%S')"
+log "📂 PATH: $PATH"
+
+# Pre-flight check
+pre_flight_check
+
+# PASTIKAN TABEL ADA
+sqlite3 $DB_PATH "CREATE TABLE IF NOT EXISTS trial_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    protocol TEXT,
+    password TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    is_active INTEGER DEFAULT 1
+);" 2>/dev/null
+
+# ==========================================
+# AMBIL DAFTAR TRIAL EXPIRED
+# ==========================================
+log "${YELLOW}🔍 Mencari trial expired...${NC}"
+
+# Gunakan temporary file dengan PID
+TMP_FILE="/tmp/expired_trials.$$.txt"
+
+sqlite3 "$DB_PATH" <<EOF > "$TMP_FILE"
+SELECT username, protocol FROM trial_accounts 
+WHERE is_active = 1 
+AND substr(expires_at, 1, 19) < datetime('now', 'localtime');
+EOF
+
+# Cek apakah query berhasil
+if [ $? -ne 0 ]; then
+    log "${RED}❌ Query gagal${NC}"
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+
+# Hitung jumlah expired
+EXPIRED_COUNT=$(wc -l < "$TMP_FILE")
+log "📊 Ditemukan $EXPIRED_COUNT trial expired"
+
+DELETED=0
+DELETED_LIST=""
+RESTART_XRAY=0
+
+# Proses setiap baris
+while IFS='|' read -r username protocol; do
+    if [ -n "$username" ] && [ -n "$protocol" ]; then
+        log "${YELLOW}⚠️ EXPIRED: $username ($protocol)${NC}"
+        
+        # VALIDASI USERNAME (double check)
+        if ! is_safe_username "$username"; then
+            log "  ❌ SAFETY: Username $username tidak aman - SKIP!"
+            continue
+        fi
+        
+        # HAPUS BERDASARKAN PROTOKOL
+        case $protocol in
+            ssh)
+                if delete_ssh "$username"; then
+                    DELETED=$((DELETED + 1))
+                    DELETED_LIST="$DELETED_LIST• ssh: $(sensor_username "$username")%0A"
+                fi
+                ;;
+            vmess|vless|trojan)
+                if delete_xray "$protocol" "$username"; then
+                    DELETED=$((DELETED + 1))
+                    DELETED_LIST="$DELETED_LIST• $protocol: $(sensor_username "$username")%0A"
+                    RESTART_XRAY=1
+                fi
+                ;;
+            *)
+                log "  ❌ Protocol tidak dikenal: $protocol"
+                continue
+                ;;
+        esac
+        
+        # HAPUS SEMUA FILE TERKAIT (LENGKAP!)
+        delete_all_related_files "$username" "$protocol"
+        
+        # UPDATE DATABASE (NONAKTIFKAN)
+        sqlite3 "$DB_PATH" "UPDATE trial_accounts SET is_active = 0 WHERE username = '$username'"
+        
+        log "  ✅ Trial $username selesai diproses"
+    fi
+done < "$TMP_FILE"
+
+# RESTART XRAY JIKA PERLU
+if [ $RESTART_XRAY -eq 1 ] && [ -f "/etc/xray/config.json" ]; then
+    log "${BLUE}🔄 Merestart XRAY service...${NC}"
+    systemctl restart xray 2>/dev/null || service xray restart 2>/dev/null
+    if [ $? -eq 0 ]; then
+        log "${GREEN}✅ XRAY direstart${NC}"
+    else
+        log "${RED}❌ Gagal restart XRAY${NC}"
+    fi
+fi
+
+# KIRIM NOTIFIKASI
+if [ $DELETED -gt 0 ]; then
+    send_notification $DELETED "$DELETED_LIST"
+    log "${GREEN}✅ $DELETED trial dihapus, notifikasi terkirim${NC}"
+else
+    log "${GREEN}✅ Tidak ada trial expired${NC}"
+fi
+
+# BERSIHKAN FILE SEMENTARA
+rm -f "$TMP_FILE"
+
+log "${GREEN}========== SELESAI ==========${NC}"
+exit 0

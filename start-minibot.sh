@@ -16,17 +16,39 @@ sleep 0.5
 wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/api-ssh.sh &>/dev/null
 sleep 0.5
 wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/server.sh &>/dev/null
+
+# // script tahap 2
+
+sleep 0.5
+wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/api-renewvm.sh &>/dev/null
+sleep 0.5
+wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/api-renewssh.sh &>/dev/null
+sleep 0.5
+wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/api-renewvl.sh &>/dev/null
+sleep 0.5
+wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/api-renewtrj.sh &>/dev/null
 chmod +x *.sh
 sleep 1
 wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/main.py &>/dev/null
 clear
 echo "DONE INSTALING....."
+wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/qris.jpg &>/dev/null
 cd
 sleep 2
 clear
 cd /etc/systemd/system/
 wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/mini-botvpn.service &>/dev/null
 cd
+
+# // package 
+sleep 0.1
+cd /usr/local/sbin/
+wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/bot-expuser &>/dev/null
+sleep 0.2
+wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/bot-renew &>/dev/null
+sleep 1
+chmod +x bot-expuser
+chmod +x bot-renew
 
 apt install python3
 apt install python3-pip

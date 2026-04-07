@@ -1,0 +1,552 @@
+#!/bin/bash
+#=====================================
+#   AUTO RENEW EXECUTOR - FIXED VERSION
+#   Dengan output channel yang lebih rapi
+#=====================================
+
+# ==========================================
+# KONFIGURASI
+# ==========================================
+CONFIG_FILE="/root/config.json"
+DB_PATH="/etc/conf/bot.db"
+LOG_FILE="/var/log/auto-renew-executor.log"
+
+# Warna output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+# ==========================================
+# FUNGSI LOGGING
+# ==========================================
+log() {
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a $LOG_FILE
+}
+
+# ==========================================
+# FUNGSI SENSOR USERNAME
+# ==========================================
+sensor_username() {
+    local username="$1"
+    local visible_chars=4
+    
+    if [ ${#username} -le $visible_chars ]; then
+        echo "$username"
+    else
+        local prefix="${username:0:$visible_chars}"
+        local stars=$(printf '%*s' $((${#username} - $visible_chars)) '' | tr ' ' '*')
+        echo "${prefix}${stars}"
+    fi
+}
+
+# ==========================================
+# FUNGSI GET USER INFO DARI DATABASE
+# ==========================================
+get_user_info() {
+    local user_id=$1
+    
+    # Coba ambil dari database transaksi terakhir
+    # Format: username|first_name
+    local user_info=$(sqlite3 $DB_PATH "SELECT description FROM transaksi WHERE user_id = $user_id AND description LIKE '%Topup%' OR description LIKE '%Beli%' ORDER BY timestamp DESC LIMIT 1" 2>/dev/null | head -1)
+    
+    if [ -n "$user_info" ]; then
+        # Extract username jika ada di description
+        if [[ "$user_info" =~ @([a-zA-Z0-9_]+) ]]; then
+            echo "${BASH_REMATCH[1]}"
+        else
+            echo "User$user_id"
+        fi
+    else
+        echo "User$user_id"
+    fi
+}
+
+# ==========================================
+# FUNGSI BACA CONFIG.JSON (IMPROVED)
+# ==========================================
+read_config() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log "${RED}❌ File config.json tidak ditemukan: $CONFIG_FILE${NC}"
+        exit 1
+    fi
+    
+    log "${GREEN}✅ Membaca config.json${NC}"
+    
+    # Baca token
+    BOT_TOKEN=$(grep -o '"token": *"[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)
+    
+    # Baca channel ID
+    CHANNEL_ID=$(grep -o '"id": *[-0-9]*' "$CONFIG_FILE" | grep -o '[-0-9]*' | head -1)
+    
+    # Baca harga
+    PRICE_SSH=$(grep -o '"ssh": *[0-9]*' "$CONFIG_FILE" | grep -o '[0-9]*')
+    PRICE_VMESS=$(grep -o '"vmess": *[0-9]*' "$CONFIG_FILE" | grep -o '[0-9]*')
+    PRICE_VLESS=$(grep -o '"vless": *[0-9]*' "$CONFIG_FILE" | grep -o '[0-9]*')
+    PRICE_TROJAN=$(grep -o '"trojan": *[0-9]*' "$CONFIG_FILE" | grep -o '[0-9]*')
+    
+    # Default harga jika tidak terbaca
+    PRICE_SSH=${PRICE_SSH:-500}
+    PRICE_VMESS=${PRICE_VMESS:-700}
+    PRICE_VLESS=${PRICE_VLESS:-700}
+    PRICE_TROJAN=${PRICE_TROJAN:-800}
+    
+    # Baca renew scripts dari config.json Anda
+    RENEW_SSH="/etc/conf/api-renewssh.sh"
+    RENEW_VMESS="/etc/conf/api-renewvm.sh"
+    RENEW_VLESS="/etc/conf/api-renewvl.sh"
+    RENEW_TROJAN="/etc/conf/api-renewtrj.sh"
+    
+    log "📌 Token: ${BOT_TOKEN:0:10}...${BOT_TOKEN: -5}"
+    log "💰 Harga SSH: $PRICE_SSH, VMess: $PRICE_VMESS, VLess: $PRICE_VLESS, Trojan: $PRICE_TROJAN"
+    
+    # Verifikasi file script ada atau tidak
+    check_script_exists
+}
+
+# ==========================================
+# FUNGSI CEK KEBERADAAN SCRIPT
+# ==========================================
+check_script_exists() {
+    log "${YELLOW}🔍 Memverifikasi keberadaan script renew:${NC}"
+    
+    [ -f "$RENEW_SSH" ] && log "✅ SSH: $RENEW_SSH ditemukan" || log "❌ SSH: $RENEW_SSH TIDAK ditemukan"
+    [ -f "$RENEW_VMESS" ] && log "✅ VMess: $RENEW_VMESS ditemukan" || log "❌ VMess: $RENEW_VMESS TIDAK ditemukan"
+    [ -f "$RENEW_VLESS" ] && log "✅ VLess: $RENEW_VLESS ditemukan" || log "❌ VLess: $RENEW_VLESS TIDAK ditemukan"
+    [ -f "$RENEW_TROJAN" ] && log "✅ Trojan: $RENEW_TROJAN ditemukan" || log "❌ Trojan: $RENEW_TROJAN TIDAK ditemukan"
+}
+
+# ==========================================
+# FUNGSI KIRIM NOTIFIKASI
+# ==========================================
+send_notification() {
+    local chat_id="$1"
+    local message="$2"
+    local to_channel="${3:-false}"  # parameter baru untuk membedakan kirim ke channel atau user
+    
+    if [ -z "$BOT_TOKEN" ]; then
+        log "❌ Token tidak ditemukan!"
+        return 1
+    fi
+    
+    # Encode message untuk URL
+    message=$(echo "$message" | sed 's/ /%20/g' | sed 's/&/%26/g' | sed 's/+/%2B/g' | sed 's/#/%23/g' | sed 's/|/%7C/g')
+    
+    local target="$chat_id"
+    log "📤 Mengirim notifikasi ke $target"
+    
+    response=$(curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+        -d chat_id="$target" \
+        -d text="$message" \
+        -d parse_mode="HTML")
+    
+    if echo "$response" | grep -q '"ok":true'; then
+        log "✅ Notifikasi terkirim"
+        return 0
+    else
+        log "❌ Gagal kirim: $response"
+        return 1
+    fi
+}
+
+# ==========================================
+# FUNGSI FORMAT PESAN UNTUK CHANNEL
+# ==========================================
+format_channel_message() {
+    local protocol=$1
+    local username=$2
+    local days=$3
+    local price=$4
+    local new_exp=$5
+    local user_display=$6  # username telegram yang sudah di-sensor
+    
+    # Icon berdasarkan protokol
+    case $protocol in
+        ssh) icon="🔰" ;;
+        vmess) icon="📡" ;;
+        vless) icon="📡" ;;
+        trojan) icon="🛡️" ;;
+        *) icon="📦" ;;
+    esac
+    
+    # Nama protokol yang rapi
+    case $protocol in
+        ssh) proto_name="SSH" ;;
+        vmess) proto_name="VMess" ;;
+        vless) proto_name="VLess" ;;
+        trojan) proto_name="Trojan" ;;
+        *) proto_name="$protocol" ;;
+    esac
+    
+    # Format pesan dengan desain yang lebih rapi
+    local message="╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮%0A"
+    message+="┃      🔄 AUTO RENEW        ┃%0A"
+    message+="╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯%0A%0A"
+    
+    message+="━━━━━━━━━━━━━━━━━━━━━━━━━━%0A"
+    message+="⏰ Waktu: $(date '+%d/%m/%Y %H:%M')%0A"
+    message+="━━━━━━━━━━━━━━━━━━━━━━━━━━%0A%0A"
+    
+    message+="👤 Pembeli: $user_display%0A"
+    message+="$icon Akun: $proto_name%0A"
+    message+="👤 Username: <code>$(sensor_username "$username")</code>%0A"
+    message+="📅 Perpanjang: $days hari%0A"
+    message+="💰 Harga: Rp $price%0A"
+    message+="📅 Exp baru: $new_exp%0A%0A"
+    
+    message+="━━━━━━━━━━━━━━━━━━━━━━━━━━%0A"
+    message+="🔍 CEK DI BOT%0A"
+    message+="📱 @WaanStore_bot%0A"
+    message+="━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    echo "$message"
+}
+
+# ==========================================
+# FUNGSI FORMAT PESAN UNTUK USER
+# ==========================================
+format_user_message() {
+    local protocol=$1
+    local username=$2
+    local days=$3
+    local price=$4
+    local new_exp=$5
+    local new_balance=$6
+    local status=$7  # success atau failed
+    
+    # Icon berdasarkan protokol
+    case $protocol in
+        ssh) icon="🔰" ;;
+        vmess) icon="📡" ;;
+        vless) icon="📡" ;;
+        trojan) icon="🛡️" ;;
+        *) icon="📦" ;;
+    esac
+    
+    # Nama protokol yang rapi
+    case $protocol in
+        ssh) proto_name="SSH" ;;
+        vmess) proto_name="VMess" ;;
+        vless) proto_name="VLess" ;;
+        trojan) proto_name="Trojan" ;;
+        *) proto_name="$protocol" ;;
+    esac
+    
+    if [ "$status" == "success" ]; then
+        local message="╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮%0A"
+        message+="┃   ✅ AUTO RENEW SUKSES    ┃%0A"
+        message+="╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯%0A%0A"
+        
+        message+="━━━━━━━━━━━━━━━━━━━━━━━━━━%0A"
+        message+="📋 DETAIL AKUN%0A"
+        message+="━━━━━━━━━━━━━━━━━━━━━━━━━━%0A"
+        message+="$icon Akun: $proto_name%0A"
+        message+="👤 Username: <code>$username</code>%0A"
+        message+="📅 Masa Aktif: $days hari%0A"
+        message+="💰 Total: Rp $price%0A"
+        message+="💵 Sisa Saldo: Rp $new_balance%0A"
+        message+="📅 Expired Baru: $new_exp%0A%0A"
+        
+        message+="━━━━━━━━━━━━━━━━━━━━━━━━━━%0A"
+        message+="Terima kasih telah menggunakan%0A"
+        message+="auto renew otomatis 🙏%0A"
+        message+="━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+        local kurang=$4
+        local balance=$5
+        
+        message="╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮%0A"
+        message+="┃   ❌ AUTO RENEW GAGAL    ┃%0A"
+        message+="╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯%0A%0A"
+        
+        message+="━━━━━━━━━━━━━━━━━━━━━━━━━━%0A"
+        message+="Akun $protoName <code>$username</code>%0A"
+        message+="akan expired besok.%0A%0A"
+        message+="💰 Dibutuhkan: Rp $price%0A"
+        message+="💵 Saldo: Rp $balance%0A"
+        message+="🔻 Kekurangan: Rp $kurang%0A%0A"
+        
+        message+="⚠️ Auto Renew dinonaktifkan%0A"
+        message+="Silakan Topup dan aktifkan kembali%0A"
+        message+="━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+    
+    echo "$message"
+}
+
+# ==========================================
+# FUNGSI GET SALDO
+# ==========================================
+get_balance() {
+    local user_id=$1
+    sqlite3 $DB_PATH "SELECT balance FROM saldo WHERE user_id = $user_id" 2>/dev/null
+}
+
+# ==========================================
+# FUNGSI UPDATE SALDO
+# ==========================================
+update_balance() {
+    local user_id=$1
+    local amount=$2
+    local desc=$3
+    
+    sqlite3 $DB_PATH "UPDATE saldo SET balance = balance + $amount WHERE user_id = $user_id" 2>/dev/null
+    sqlite3 $DB_PATH "INSERT INTO transaksi (user_id, type, amount, description) VALUES ($user_id, 'debit', $(( -amount )), '$desc')" 2>/dev/null
+}
+
+# ==========================================
+# FUNGSI GET SCRIPT RENEW PATH
+# ==========================================
+get_renew_script() {
+    local protocol=$1
+    
+    case $protocol in
+        ssh) echo "$RENEW_SSH" ;;
+        vmess) echo "$RENEW_VMESS" ;;
+        vless) echo "$RENEW_VLESS" ;;
+        trojan) echo "$RENEW_TROJAN" ;;
+        *) echo "" ;;
+    esac
+}
+
+# ==========================================
+# FUNGSI GET PRICE
+# ==========================================
+get_price() {
+    local protocol=$1
+    local days=$2
+    
+    case $protocol in
+        ssh) price=$(( PRICE_SSH * days )) ;;
+        vmess) price=$(( PRICE_VMESS * days )) ;;
+        vless) price=$(( PRICE_VLESS * days )) ;;
+        trojan) price=$(( PRICE_TROJAN * days )) ;;
+        *) price=0 ;;
+    esac
+    
+    echo $price
+}
+
+# ==========================================
+# FUNGSI CEK EXPIRED AKUN
+# ==========================================
+check_account_expiry() {
+    local protocol=$1
+    local username=$2
+    
+    case $protocol in
+        ssh)
+            if id "$username" &>/dev/null; then
+                exp_str=$(chage -l "$username" 2>/dev/null | grep "Account expires" | cut -d: -f2 | xargs)
+                if [ "$exp_str" != "never" ] && [ -n "$exp_str" ]; then
+                    date -d "$exp_str" +%Y-%m-%d 2>/dev/null
+                fi
+            fi
+            ;;
+        vmess)
+            if [ -f "/etc/xray/config.json" ]; then
+                grep "### $username" /etc/xray/config.json | head -1 | awk '{print $3}' | tr -d '\n\r' | xargs
+            fi
+            ;;
+        vless)
+            if [ -f "/etc/xray/config.json" ]; then
+                grep "#& $username" /etc/xray/config.json | head -1 | awk '{print $3}' | tr -d '\n\r' | xargs
+            fi
+            ;;
+        trojan)
+            if [ -f "/etc/xray/config.json" ]; then
+                grep "#! $username" /etc/xray/config.json | head -1 | awk '{print $3}' | tr -d '\n\r' | xargs
+            fi
+            ;;
+    esac
+}
+
+# ==========================================
+# FUNGSI PROSES RENEW
+# ==========================================
+process_renew() {
+    local user_id=$1
+    local protocol=$2
+    local username=$3
+    local days=$4
+    local price=$5
+    
+    # Dapatkan info user untuk display di channel
+    local user_display=$(get_user_info $user_id)
+    local user_sensor=$(sensor_username "$user_display")
+    
+    # Cek saldo
+    balance=$(get_balance $user_id)
+    balance=${balance:-0}
+    
+    log "💰 Saldo user: Rp $balance"
+    log "💰 Harga renew: Rp $price"
+    
+    if [ $balance -ge $price ]; then
+        # Potong saldo
+        update_balance $user_id -$price "Auto Renew $protocol $username +$days hari"
+        log "✅ Saldo dipotong Rp $price"
+        
+        # Dapatkan script path
+        script_path=$(get_renew_script $protocol)
+        
+        if [ -n "$script_path" ] && [ -f "$script_path" ]; then
+            log "📦 Menjalankan script renew: $script_path"
+            
+            # Jalankan script renew dengan input: username, days, quota, iplimit
+            echo -e "$username\n$days\n250\n4" | bash "$script_path" > /dev/null 2>&1
+            
+            if [ $? -eq 0 ]; then
+                new_balance=$((balance - price))
+                new_exp=$(date -d "+$days days" +%Y-%m-%d)
+                
+                # Simpan log ke database
+                sqlite3 $DB_PATH "INSERT INTO auto_renew_logs (user_id, protocol, account_username, action, amount, status, message) VALUES ($user_id, '$protocol', '$username', 'renew', $price, 'success', 'Auto renew berhasil')" 2>/dev/null
+                
+                # Kirim notifikasi ke user
+                user_message=$(format_user_message "$protocol" "$username" "$days" "$price" "$new_exp" "$new_balance" "success")
+                send_notification "$user_id" "$user_message"
+                log "✅ Notifikasi sukses terkirim ke user $user_id"
+                
+                # Kirim juga ke channel dengan format yang lebih rapi
+                if [ -n "$CHANNEL_ID" ] && [ "$CHANNEL_ID" != "null" ] && [ "$CHANNEL_ID" != "0" ]; then
+                    channel_message=$(format_channel_message "$protocol" "$username" "$days" "$price" "$new_exp" "$user_sensor")
+                    send_notification "$CHANNEL_ID" "$channel_message"
+                    log "✅ Notifikasi terkirim ke channel"
+                fi
+                
+                log "✅ Auto renew berhasil untuk $username"
+                return 0
+            else
+                log "❌ Script renew gagal dijalankan"
+                return 1
+            fi
+        else
+            log "❌ Script renew tidak ditemukan: $script_path"
+            
+            # Notifikasi gagal karena script tidak ditemukan
+            local message="╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮%0A"
+            message+="┃     ❌ SYSTEM ERROR       ┃%0A"
+            message+="╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯%0A%0A"
+            message+="Script renew untuk $protocol tidak ditemukan.%0A"
+            message+="Hubungi admin untuk memperbaiki."
+            
+            send_notification "$user_id" "$message"
+            return 1
+        fi
+    else
+        # Saldo tidak cukup
+        kurang=$((price - balance))
+        
+        # Nonaktifkan auto renew
+        sqlite3 $DB_PATH "UPDATE auto_renew_settings SET is_active = 0 WHERE user_id = $user_id AND protocol = '$protocol' AND account_username = '$username'" 2>/dev/null
+        
+        # Kirim notifikasi gagal ke user
+        local proto_name=$(echo "$protocol" | tr '[:lower:]' '[:upper:]')
+        local message="╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮%0A"
+        message+="┃   ❌ AUTO RENEW GAGAL    ┃%0A"
+        message+="╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯%0A%0A"
+        message+="Akun $proto_name <code>$username</code>%0A"
+        message+="akan expired besok.%0A%0A"
+        message+="💰 Dibutuhkan: Rp $price%0A"
+        message+="💵 Saldo: Rp $balance%0A"
+        message+="🔻 Kekurangan: Rp $kurang%0A%0A"
+        message+="⚠️ Auto Renew dinonaktifkan%0A"
+        message+="Silakan Topup dan aktifkan kembali"
+        
+        send_notification "$user_id" "$message"
+        log "❌ Saldo tidak cukup untuk $username"
+        
+        # Kirim notifikasi ke channel (optional)
+        if [ -n "$CHANNEL_ID" ] && [ "$CHANNEL_ID" != "null" ] && [ "$CHANNEL_ID" != "0" ]; then
+            local channel_msg="╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮%0A"
+            channel_msg+="┃   ⚠️ AUTO RENEW GAGAL    ┃%0A"
+            channel_msg+="╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯%0A%0A"
+            channel_msg+="👤 Pembeli: $user_sensor%0A"
+            channel_msg+="📦 Akun: $proto_name%0A"
+            channel_msg+="👤 Username: $(sensor_username "$username")%0A"
+            channel_msg+="💰 Harga: Rp $price%0A"
+            channel_msg+="❌ Gagal: Saldo tidak cukup"
+            
+            send_notification "$CHANNEL_ID" "$channel_msg"
+        fi
+        
+        return 1
+    fi
+}
+
+# ==========================================
+# MAIN
+# ==========================================
+
+# Baca config.json
+read_config
+
+log "${GREEN}========== AUTO RENEW EXECUTOR ==========${NC}"
+
+today=$(date +%Y-%m-%d)
+tomorrow=$(date -d "+1 day" +%Y-%m-%d)
+log "📅 Hari ini: $today"
+log "📅 Besok: $tomorrow"
+
+# Cek apakah database ada
+if [ ! -f "$DB_PATH" ]; then
+    log "${RED}❌ Database tidak ditemukan: $DB_PATH${NC}"
+    exit 1
+fi
+
+# ==========================================
+# CEK AUTO RENEW SETTINGS
+# ==========================================
+log "${YELLOW}🔍 Mencari akun yang akan expired besok...${NC}"
+
+# Ambil semua setting auto renew yang aktif
+sqlite3 $DB_PATH "SELECT user_id, protocol, account_username FROM auto_renew_settings WHERE is_active = 1" 2>/dev/null | while IFS='|' read user_id protocol username; do
+    
+    log "🔍 Processing: User $user_id, $protocol, $username"
+    
+    # Cek tanggal expired akun
+    exp_date=$(check_account_expiry "$protocol" "$username")
+    
+    if [ -n "$exp_date" ]; then
+        log "📅 Exp date: $exp_date"
+        
+        if [ "$exp_date" == "$tomorrow" ]; then
+            log "✅ AKUN INI AKAN EXPIRE BESOK!"
+            
+            # Proses renew (default 30 hari)
+            days=30
+            price=$(get_price "$protocol" "$days")
+            
+            process_renew "$user_id" "$protocol" "$username" "$days" "$price"
+            
+        elif [ "$exp_date" \< "$tomorrow" ]; then
+            log "⚠️ Akun sudah expired! Nonaktifkan auto renew"
+            sqlite3 $DB_PATH "UPDATE auto_renew_settings SET is_active = 0 WHERE user_id = $user_id AND protocol = '$protocol' AND account_username = '$username'" 2>/dev/null
+            
+            # Notifikasi ke user
+            local proto_name=$(echo "$protocol" | tr '[:lower:]' '[:upper:]')
+            local message="╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮%0A"
+            message+="┃   ⚠️ AUTO RENEW OFF       ┃%0A"
+            message+="╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯%0A%0A"
+            message+="Akun $proto_name <code>$username</code>%0A"
+            message+="sudah expired.%0A%0A"
+            message+="Auto Renew dinonaktifkan.%0A"
+            message+="Silakan aktifkan kembali jika ingin."
+            
+            send_notification "$user_id" "$message"
+            
+        else
+            diff_days=$(( ( $(date -d "$exp_date" +%s) - $(date -d "$today" +%s) ) / 86400 ))
+            log "❌ Bukan expired besok (masih $diff_days hari lagi)"
+        fi
+    else
+        log "❌ Tidak dapat membaca tanggal expired untuk $username"
+        
+        # Kemungkinan akun sudah dihapus
+        sqlite3 $DB_PATH "UPDATE auto_renew_settings SET is_active = 0 WHERE user_id = $user_id AND protocol = '$protocol' AND account_username = '$username'" 2>/dev/null
+    fi
+done
+
+log "${GREEN}✅ Auto Renew Executor Selesai${NC}"
+log "${GREEN}========== SELESAI ==========${NC}"
