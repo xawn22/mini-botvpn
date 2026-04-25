@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 BOT TELEGRAM - Create SSH/VMess/VLess/Trojan
-Version: 19.0 - FINAL COMPLETE VERSION
-Fitur: Create, Renew, Trial, Voucher, Auto Renew, Topup QRIS, Log Channel
+Version: 22.0 - COMPLETE WITH REGION & STOCK MANAGEMENT
+Fitur: Create, Renew, Trial, Voucher, Auto Renew, Topup QRIS, Log Channel, Broadcast, Region, Stock Management
 """
 
 import subprocess
@@ -52,7 +52,7 @@ def load_config():
 # ==========================================
 # DEFINISIKAN CONFIG DULU
 # ==========================================
-config = load_config()  # <-- INI PENTING! HARUS SEBELUM DIGUNAKAN
+config = load_config()
 
 # ==========================================
 # AMBIL SEMUA KONFIGURASI DARI JSON
@@ -69,7 +69,7 @@ CHANNEL_URL = config.get('channel', {}).get('url', "https://t.me/mytesssssyyyy")
 SCRIPTS = config['scripts']
 RENEW_SCRIPTS = config.get('renew_scripts', {})
 
-# HARGA - PASTIKAN INI TERBACA DENGAN BENAR
+# HARGA
 if 'prices' in config:
     PRICES = config['prices']
     print(f"✅ Harga dari config.json: {PRICES}")
@@ -108,16 +108,10 @@ else:
 # QRIS PATH
 QRIS_IMAGE_PATH = config.get('qris_path', "/etc/conf/qris.jpg")
 
-# DEBUG: CETAK HARGA UNTUK MEMASTIKAN
 print(f"💰 Harga SSH: {PRICES['ssh']}")
 print(f"💰 Harga VMess: {PRICES['vmess']}")
 print(f"💰 Harga VLess: {PRICES['vless']}")
 print(f"💰 Harga Trojan: {PRICES['trojan']}")
-
-
-def is_allowed(user_id):
-    """Semua user diizinkan mengakses bot"""
-    return True
 
 # ==========================================
 # STATE UNTUK CONVERSATION
@@ -142,12 +136,18 @@ def is_allowed(user_id):
     RENEW_USERNAME,
     RENEW_DAYS,
     TRIAL_MENU,
-	AUTO_RENEW_MENU,
+    AUTO_RENEW_MENU,
     AUTO_RENEW_USERNAME,
     AUTO_RENEW_SETTING,
-	EDIT_HARGA_MENU,
-	EDIT_HARGA_INPUT
-) = range(24)
+    EDIT_HARGA_MENU,
+    EDIT_HARGA_INPUT,
+    BROADCAST_MENU,
+    BROADCAST_INPUT,
+    STOCK_MENU,
+    STOCK_INPUT_ADD,
+    STOCK_INPUT_REMOVE,
+    STOCK_INPUT_SET
+) = range(30)
 
 # ==========================================
 # KONFIGURASI HARGA & DATABASE
@@ -175,6 +175,57 @@ def init_log_file():
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, 'w') as f:
             json.dump([], f)
+
+# ==========================================
+# DATABASE USER UNTUK BROADCAST
+# ==========================================
+def init_user_db():
+    """Inisialisasi database user untuk broadcast"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS bot_users
+                 (user_id INTEGER PRIMARY KEY,
+                  username TEXT,
+                  first_name TEXT,
+                  last_name TEXT,
+                  first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    conn.commit()
+    conn.close()
+    print("✅ Database user untuk broadcast initialized")
+
+def register_user(user_id, username, first_name, last_name):
+    """Registrasi user ke database"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('''INSERT OR REPLACE INTO bot_users 
+                 (user_id, username, first_name, last_name, last_seen)
+                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)''',
+              (user_id, username or "", first_name or "", last_name or ""))
+    
+    conn.commit()
+    conn.close()
+
+def get_all_users():
+    """Ambil semua user yang pernah mengakses bot"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id, username, first_name FROM bot_users ORDER BY last_seen DESC")
+    users = c.fetchall()
+    conn.close()
+    return users
+
+def get_user_count():
+    """Hitung jumlah user"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM bot_users")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
 # ==========================================
 # FUNGSI SENSOR USERNAME
@@ -213,8 +264,7 @@ def sensor_transaksi_id(transaksi_id, prefix_chars=4, suffix_chars=4):
     middle = "*" * (len(transaksi_id) - prefix_chars - suffix_chars)
     
     return f"{prefix}{middle}{suffix}"
-	
-	
+
 def get_active_auto_renew(user_id):
     """Ambil daftar akun yang auto renew aktif"""
     conn = sqlite3.connect(DB_PATH)
@@ -226,55 +276,438 @@ def get_active_auto_renew(user_id):
     results = c.fetchall()
     conn.close()
     return results
-	
-	
+
 def update_harga_in_config(protocol, harga_baru):
     """Update harga di file config.json"""
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     
     try:
-        # Baca config.json
         with open(config_path, 'r') as f:
             config = json.load(f)
         
-        # Update harga
         if 'prices' not in config:
             config['prices'] = {}
         
         config['prices'][protocol] = harga_baru
         
-        # Tulis kembali
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
         
-        # Update global variable
         global PRICES
         PRICES[protocol] = harga_baru
         
         return True, f"Harga {protocol.upper()} berhasil diupdate menjadi Rp {harga_baru:,}"
     except Exception as e:
         return False, f"Error: {str(e)}"
-		
 
-
-async def edit_harga_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menu edit harga - hanya untuk owner"""
-    print("\n" + "="*60)
-    print("🔴🔴🔴 EDIT HARGA MENU DIPANGGIL! 🔴🔴🔴")
-    print("="*60)
+# ==========================================
+# FUNGSI DETEKSI REGION (IPINFO.IO)
+# ==========================================
+def get_server_region():
+    """Deteksi region server menggunakan ipinfo.io"""
+    try:
+        result = subprocess.run(['curl', '-s', 'https://ipinfo.io/json'], 
+                               capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout:
+            data = json.loads(result.stdout)
+            country = data.get('country', 'Unknown')
+            city = data.get('city', 'Unknown')
+            
+            country_map = {
+                'ID': '🇮🇩 ID',
+                'SG': '🇸🇬 SG',
+                'MY': '🇲🇾 Malaysia',
+                'US': '🇺🇸 United States',
+                'JP': '🇯🇵 Japan',
+                'DE': '🇩🇪 Germany',
+                'NL': '🇳🇱 Netherlands',
+                'GB': '🇬🇧 United Kingdom',
+                'FR': '🇫🇷 France',
+                'AU': '🇦🇺 Australia',
+                'CA': '🇨🇦 Canada',
+                'IN': '🇮🇳 India',
+                'KR': '🇰🇷 South Korea',
+                'BR': '🇧🇷 Brazil',
+                'RU': '🇷🇺 Russia',
+                'IT': '🇮🇹 Italy',
+                'ES': '🇪🇸 Spain',
+                'MX': '🇲🇽 Mexico',
+                'ZA': '🇿🇦 South Africa',
+            }
+            
+            country_name = country_map.get(country, f"🌍 {country}")
+            
+            if city and city != 'Unknown':
+                return f"{country_name} ({city})"
+            return country_name
+    except Exception as e:
+        print(f"❌ Gagal deteksi region: {e}")
     
+    try:
+        with open('/etc/region.conf', 'r') as f:
+            return f.readline().strip()
+    except:
+        pass
+    
+    return "🇸🇬 Singapore (Default)"
+
+# ==========================================
+# FUNGSI MANAJEMEN STOK
+# ==========================================
+def init_stock_db():
+    """Inisialisasi database stok"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS stock_settings
+                 (id INTEGER PRIMARY KEY CHECK (id = 1),
+                  max_stock INTEGER DEFAULT 100,
+                  last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    c.execute('''INSERT OR IGNORE INTO stock_settings (id, max_stock) VALUES (1, 100)''')
+    
+    conn.commit()
+    conn.close()
+    print("✅ Database stok initialized")
+
+def update_max_stock(new_max_stock):
+    """Update maksimal stok"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''UPDATE stock_settings SET max_stock = ?, last_updated = CURRENT_TIMESTAMP
+                 WHERE id = 1''', (new_max_stock,))
+    conn.commit()
+    conn.close()
+
+def get_max_stock():
+    """Ambil maksimal stok dari database"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''SELECT max_stock FROM stock_settings WHERE id = 1''')
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 100
+
+def count_all_accounts():
+    """Hitung total semua akun yang ada di sistem"""
+    total = 0
+    
+    # Hitung SSH accounts dari /etc/passwd
+    try:
+        result = subprocess.run(['awk', '-F:', '$3 >= 1000 && $1 != "nobody" {print $1}', '/etc/passwd'], 
+                               capture_output=True, text=True)
+        ssh_users = result.stdout.strip().split('\n')
+        total += len([u for u in ssh_users if u])
+    except:
+        pass
+    
+    # Hitung XRAY accounts dari config.json
+    xray_config = "/etc/xray/config.json"
+    if os.path.exists(xray_config):
+        try:
+            with open(xray_config, 'r') as f:
+                content = f.read()
+                total += content.count('###')  # vmess
+                total += content.count('#&')   # vless
+                total += content.count('#!')   # trojan
+        except:
+            pass
+    
+    return total
+
+def get_global_stock_info():
+    """Ambil info stok global dengan hitung akun yang ada"""
+    total_accounts = count_all_accounts()
+    max_stock = get_max_stock()
+    
+    return {
+        'current': total_accounts,
+        'max': max_stock,
+        'available': max_stock - total_accounts
+    }
+    
+def check_stock_available():
+    """Cek apakah stok masih tersedia"""
+    stock_info = get_global_stock_info()
+    if stock_info['available'] <= 0:
+        return False, f"❌ <b>STOK AKUN HABIS TUAN</b>\n\n📦 Stok tersedia: {stock_info['available']}\n\nSilakan hubungi @WaanSuka_Turu untuk menambah stok."
+    return True, f"✅ Stok tersedia: {stock_info['available']}"
+    
+# ==========================================
+# BROADCAST FUNCTIONS
+# ==========================================
+async def broadcast_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu broadcast - hanya untuk owner"""
     query = update.callback_query
     await query.answer()
     
-    # Cek apakah owner
     if update.effective_user.id != OWNER_ID:
-        print(f"❌ Bukan owner! User ID: {update.effective_user.id}")
         await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
         return VOUCHER_MENU
     
-    print(f"✅ Owner terverifikasi: {update.effective_user.id}")
+    user_count = get_user_count()
     
-    # Tampilkan harga saat ini
+    text = (
+        f"📢 <b>BROADCAST MESSAGE</b>\n\n"
+        f"👥 Total user terdaftar: <b>{user_count}</b> user\n\n"
+        f"Pilih tipe broadcast:\n"
+        f"• <b>Text Message</b> - Kirim pesan teks\n"
+        f"• <b>Photo + Caption</b> - Kirim foto dengan caption\n\n"
+        f"Ketik /broadcast_text untuk broadcast text\n"
+        f"Ketik /broadcast_photo untuk broadcast foto"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📝 Broadcast Text", callback_data='broadcast_text')],
+        [InlineKeyboardButton("🖼️ Broadcast Photo", callback_data='broadcast_photo')],
+        [InlineKeyboardButton("📊 Lihat Daftar User", callback_data='broadcast_list')],
+        [InlineKeyboardButton("🔙 Kembali", callback_data='voucher_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    return BROADCAST_MENU
+
+async def broadcast_text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mulai broadcast text"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return VOUCHER_MENU
+    
+    await query.edit_message_text(
+        "📝 <b>BROADCAST TEXT</b>\n\n"
+        "Kirimkan pesan yang ingin di-broadcast ke semua user.\n\n"
+        "Pesan bisa menggunakan <b>HTML formatting</b>.\n"
+        "Ketik <code>/batal</code> untuk membatalkan.",
+        parse_mode='HTML'
+    )
+    
+    return BROADCAST_INPUT
+
+async def broadcast_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mulai broadcast photo"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return VOUCHER_MENU
+    
+    await query.edit_message_text(
+        "🖼️ <b>BROADCAST PHOTO</b>\n\n"
+        "Kirimkan <b>FOTO</b> yang ingin di-broadcast ke semua user.\n"
+        "Foto bisa disertai <b>caption</b> (HTML formatting).\n\n"
+        "Ketik <code>/batal</code> untuk membatalkan.",
+        parse_mode='HTML'
+    )
+    
+    return BROADCAST_INPUT
+
+async def broadcast_process_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Proses broadcast text"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return ConversationHandler.END
+    
+    message_text = update.message.text
+    users = get_all_users()
+    
+    if not users:
+        await update.message.reply_text("❌ Belum ada user yang terdaftar!")
+        return ConversationHandler.END
+    
+    progress_msg = await update.message.reply_text(
+        f"⏱️ Memulai broadcast ke {len(users)} user...\n"
+        f"📝 Pesan: {message_text[:50]}..."
+    )
+    
+    success_count = 0
+    fail_count = 0
+    failed_users = []
+    
+    for i, (user_id, username, first_name) in enumerate(users):
+        try:
+            personalized_msg = message_text.replace("{name}", first_name or "User")
+            personalized_msg = personalized_msg.replace("{username}", username or "User")
+            
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=personalized_msg,
+                parse_mode='HTML'
+            )
+            success_count += 1
+            
+            if (i + 1) % 10 == 0:
+                await progress_msg.edit_text(
+                    f"⏱️ Broadcast berjalan...\n"
+                    f"✅ Berhasil: {success_count}\n"
+                    f"❌ Gagal: {fail_count}\n"
+                    f"📊 Progres: {i+1}/{len(users)}"
+                )
+            
+            await asyncio.sleep(0.05)
+            
+        except Exception as e:
+            fail_count += 1
+            failed_users.append(user_id)
+            print(f"❌ Gagal kirim ke {user_id}: {e}")
+    
+    report = (
+        f"✅ <b>BROADCAST SELESAI!</b>\n\n"
+        f"📊 Total user: {len(users)}\n"
+        f"✅ Berhasil: {success_count}\n"
+        f"❌ Gagal: {fail_count}\n\n"
+    )
+    
+    if failed_users and len(failed_users) <= 10:
+        report += f"❌ Gagal ke user: {', '.join(map(str, failed_users))}"
+    elif failed_users:
+        report += f"❌ Gagal ke {len(failed_users)} user (tidak ditampilkan)"
+    
+    await progress_msg.edit_text(report, parse_mode='HTML')
+    
+    try:
+        channel_msg = (
+            f"📢 <b>BROADCAST TERKIRIM</b>\n\n"
+            f"👤 Owner: @{update.effective_user.username}\n"
+            f"📊 Total user: {len(users)}\n"
+            f"✅ Berhasil: {success_count}\n"
+            f"❌ Gagal: {fail_count}\n"
+            f"📝 Pesan: {message_text[:100]}..."
+        )
+        await send_to_channel(context, channel_msg)
+    except:
+        pass
+    
+    context.user_data.clear()
+    return PROTOKOL
+
+async def broadcast_process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Proses broadcast photo"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return ConversationHandler.END
+    
+    if not update.message.photo:
+        await update.message.reply_text("❌ Kirimkan FOTO untuk broadcast!")
+        return BROADCAST_INPUT
+    
+    photo = update.message.photo[-1]
+    caption = update.message.caption or ""
+    users = get_all_users()
+    
+    if not users:
+        await update.message.reply_text("❌ Belum ada user yang terdaftar!")
+        return ConversationHandler.END
+    
+    progress_msg = await update.message.reply_text(
+        f"⏱️ Memulai broadcast foto ke {len(users)} user...\n"
+        f"📝 Caption: {caption[:50]}..."
+    )
+    
+    success_count = 0
+    fail_count = 0
+    
+    for i, (user_id, username, first_name) in enumerate(users):
+        try:
+            personalized_caption = caption.replace("{name}", first_name or "User")
+            personalized_caption = personalized_caption.replace("{username}", username or "User")
+            
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=photo.file_id,
+                caption=personalized_caption,
+                parse_mode='HTML'
+            )
+            success_count += 1
+            
+            if (i + 1) % 10 == 0:
+                await progress_msg.edit_text(
+                    f"⏱️ Broadcast berjalan...\n"
+                    f"✅ Berhasil: {success_count}\n"
+                    f"❌ Gagal: {fail_count}\n"
+                    f"📊 Progres: {i+1}/{len(users)}"
+                )
+            
+            await asyncio.sleep(0.05)
+            
+        except Exception as e:
+            fail_count += 1
+            print(f"❌ Gagal kirim ke {user_id}: {e}")
+    
+    report = (
+        f"✅ <b>BROADCAST FOTO SELESAI!</b>\n\n"
+        f"📊 Total user: {len(users)}\n"
+        f"✅ Berhasil: {success_count}\n"
+        f"❌ Gagal: {fail_count}"
+    )
+    
+    await progress_msg.edit_text(report, parse_mode='HTML')
+    
+    try:
+        channel_msg = (
+            f"📢 <b>BROADCAST FOTO TERKIRIM</b>\n\n"
+            f"👤 Owner: @{update.effective_user.username}\n"
+            f"📊 Total user: {len(users)}\n"
+            f"✅ Berhasil: {success_count}\n"
+            f"❌ Gagal: {fail_count}"
+        )
+        await send_to_channel(context, channel_msg)
+    except:
+        pass
+    
+    context.user_data.clear()
+    return PROTOKOL
+
+async def broadcast_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lihat daftar user"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return VOUCHER_MENU
+    
+    users = get_all_users()
+    
+    if not users:
+        await query.edit_message_text("📭 Belum ada user yang terdaftar.")
+        return BROADCAST_MENU
+    
+    text = "📊 <b>DAFTAR USER TERDAFTAR</b>\n\n"
+    text += f"Total: {len(users)} user\n\n"
+    
+    for i, (user_id, username, first_name) in enumerate(users[:20]):
+        display_name = first_name[:15] if first_name else "Unknown"
+        if username:
+            text += f"{i+1}. @{username[:15]} ({display_name})\n   🆔 <code>{user_id}</code>\n"
+        else:
+            text += f"{i+1}. {display_name}\n   🆔 <code>{user_id}</code>\n"
+    
+    if len(users) > 20:
+        text += f"\n... dan {len(users) - 20} user lainnya"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Kembali", callback_data='broadcast_menu')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    return BROADCAST_MENU
+
+# ==========================================
+# EDIT HARGA MENU
+# ==========================================
+async def edit_harga_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu edit harga - hanya untuk owner"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return VOUCHER_MENU
+    
     text = "💰 <b>EDIT HARGA PER PROTOKOL</b>\n\n"
     text += "Harga saat ini:\n"
     text += f"🚀 SSH      : Rp {PRICES['ssh']:,}/hari\n"
@@ -304,7 +737,6 @@ async def edit_harga_pilih_protokol(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     
-    # Cek apakah owner
     if update.effective_user.id != OWNER_ID:
         await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
         return VOUCHER_MENU
@@ -334,13 +766,11 @@ async def edit_harga_pilih_protokol(update: Update, context: ContextTypes.DEFAUL
     
     await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
     return EDIT_HARGA_INPUT
-	
 
 async def edit_harga_proses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Proses input harga baru"""
     user_id = update.effective_user.id
     
-    # Cek apakah owner
     if user_id != OWNER_ID:
         await update.message.reply_text("❌ Hanya owner yang bisa akses fitur ini!")
         return ConversationHandler.END
@@ -361,11 +791,9 @@ async def edit_harga_proses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Harga maksimal Rp 10.000")
             return EDIT_HARGA_INPUT
         
-        # Update harga di config.json
         success, message = update_harga_in_config(protocol, harga_baru)
         
         if success:
-            # Kirim notifikasi ke channel
             try:
                 channel_msg = (
                     f"💰 <b>HARGA DIUPDATE</b>\n\n"
@@ -390,33 +818,21 @@ async def edit_harga_proses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Masukkan angka yang valid!")
         return EDIT_HARGA_INPUT
     
-    # Kembali ke menu edit harga
     await edit_harga_menu(update, context)
     return EDIT_HARGA_MENU
 
 async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, message: str, photo_path=None):
     """Kirim pesan ke channel"""
     try:
-        # Pastikan CHANNEL_ID ada
-        if not CHANNEL_ID:
-            print("⚠️ CHANNEL_ID tidak ada, skip notifikasi")
+        if not CHANNEL_ID or CHANNEL_ID == 0:
+            print("⚠️ CHANNEL_ID tidak valid, skip notifikasi")
             return False
         
-        # Jika CHANNEL_ID adalah 0, skip
-        if CHANNEL_ID == 0:
-            print("⚠️ CHANNEL_ID = 0, skip notifikasi")
-            return False
-        
-        # Jika CHANNEL_ID adalah string username
         if isinstance(CHANNEL_ID, str) and CHANNEL_ID.startswith('@'):
             chat_id = CHANNEL_ID
-            print(f"📤 Mengirim ke username channel: {chat_id}")
         else:
-            # Pastikan integer
             chat_id = int(CHANNEL_ID)
-            print(f"📤 Mengirim ke channel ID: {chat_id}")
         
-        # Kirim pesan
         if photo_path and os.path.exists(photo_path):
             with open(photo_path, 'rb') as photo:
                 await context.bot.send_photo(
@@ -435,19 +851,9 @@ async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, message: str, phot
         return True
         
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Gagal kirim ke channel: {error_msg}")
-        
-        # Tampilkan detail untuk debugging
-        if "Chat not found" in error_msg:
-            print(f"   ⚠️ Channel ID yang digunakan: {CHANNEL_ID}")
-            print("   Solusi:")
-            print("   1. Pastikan bot sudah diinvite ke channel")
-            print("   2. Pastikan bot adalah admin channel")
-            print("   3. Coba gunakan username channel: @namachannel")
-        
+        print(f"❌ Gagal kirim ke channel: {e}")
         return False
-
+        
 # ==========================================
 # FUNGSI SAVE ACCOUNT LOG
 # ==========================================
@@ -512,7 +918,6 @@ def save_account_log(update, username, protocol, days, quota, iplimit,
     with open(LOG_FILE, 'w') as f:
         json.dump(logs, f, indent=2)
     
-    # KIRIM KE CHANNEL JIKA STATUS SUKSES
     if status == "success" and (action == "create" or action == "renew"):
         try:
             asyncio.create_task(send_log_to_channel(update, log_entry, action.upper()))
@@ -523,9 +928,8 @@ def save_account_log(update, username, protocol, days, quota, iplimit,
     return log_entry
 
 async def send_log_to_channel(update, log_entry, action):
-    """Kirim log ke channel - LEVEL 1 (Username pembeli + TRX ID sensor)"""
+    """Kirim log ke channel"""
     try:
-        # Dapatkan bot dari update
         if hasattr(update, 'get_bot'):
             bot = update.get_bot()
         elif hasattr(update, 'bot'):
@@ -541,7 +945,6 @@ async def send_log_to_channel(update, log_entry, action):
         user_info = log_entry['user']
         account_info = log_entry['account']
         
-        # SENSOR USERNAME (5 KARAKTER PERTAMA + x)
         raw_username = user_info['username']
         if raw_username != "Tidak ada username":
             clean_username = raw_username.replace('@', '')
@@ -550,7 +953,6 @@ async def send_log_to_channel(update, log_entry, action):
         else:
             user_display = "User"
         
-        # Buat TRX ID dari timestamp
         transaksi_id = f"TRX{user_info['id']}{datetime.now().strftime('%Y%m%d%H%M%S')}"
         sensor_trx = sensor_transaksi_id(transaksi_id, 4, 4)
         
@@ -564,19 +966,15 @@ async def send_log_to_channel(update, log_entry, action):
         
         waktu = datetime.now().strftime('%d/%m/%Y %H:%M')
         
-        # USERNAME + TRX ID
         message = (
             f"╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
             f"┃     📢 TRANSAKSI BARU     ┃\n"
             f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏰ Waktu: {waktu}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            
             f"👤 Pembeli: {user_display}\n"
             f"🆔 TRX ID: <code>{sensor_trx}</code>\n\n"
-            
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📦 DETAIL TRANSAKSI\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -584,34 +982,23 @@ async def send_log_to_channel(update, log_entry, action):
             f"{icon} Akun: {account_info['protocol'].upper()}\n"
             f"📅 Masa Aktif: {account_info['days']} hari\n"
             f"⏰ Exp: {account_info['expired_date']}\n\n"
-            
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🔍 BOT AUTO ORDER\n"
             f"🤖 @autobuy_produk_bot\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
         
-        # ===== PERBAIKAN UTAMA =====
-        # Pastikan CHANNEL_ID valid
         channel_id = CHANNEL_ID
-        
-        # Jika channel_id adalah 0 atau None, skip
         if not channel_id or channel_id == 0:
-            print("⚠️ CHANNEL_ID tidak valid (0 atau None), skip notifikasi channel")
+            print("⚠️ CHANNEL_ID tidak valid, skip notifikasi channel")
             return
         
-        # Konversi ke int jika perlu
         if isinstance(channel_id, str):
             try:
                 channel_id = int(channel_id)
             except ValueError:
-                # Jika gagal konversi, biarkan sebagai string (mungkin username)
                 pass
         
-        # Tambahkan debug
-        print(f"📤 Mengirim ke channel ID: {channel_id} (type: {type(channel_id).__name__})")
-        
-        # Kirim langsung pakai bot
         await bot.send_message(
             chat_id=channel_id,
             text=message,
@@ -621,8 +1008,6 @@ async def send_log_to_channel(update, log_entry, action):
         
     except Exception as e:
         print(f"❌ Error di send_log_to_channel: {e}")
-        import traceback
-        traceback.print_exc()
 
 # ==========================================
 # LOGGING
@@ -838,7 +1223,7 @@ def use_voucher(code, user_id):
         'value': v_value,
         'days': v_days
     }
-
+    
 # ==========================================
 # FUNGSI DATABASE AUTO RENEW
 # ==========================================
@@ -978,19 +1363,15 @@ def generate_random_username(protocol, length=4):
     return f"{TRIAL_CONFIG['username_prefix']}_{protocol}_{random_part}"
 
 def save_trial_account(username, protocol, password, hours=1):
-    """Simpan akun trial ke database dengan format yang kompatibel dengan SQLite"""
-    
-    # FORMAT YANG BENAR: YYYY-MM-DD HH:MM:SS (tanpa T, tanpa microsecond)
+    """Simpan akun trial ke database"""
     now = datetime.now()
     expires_at = (now + timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
     
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    # Hapus yang lama jika ada
     c.execute('''DELETE FROM trial_accounts WHERE username = ?''', (username,))
     
-    # Insert dengan format baru
     c.execute('''INSERT INTO trial_accounts (username, protocol, password, expires_at)
                  VALUES (?, ?, ?, ?)''', (username, protocol, password, expires_at))
     
@@ -1141,7 +1522,6 @@ async def get_user_accounts(user_id):
     """Ambil semua akun yang dimiliki user"""
     accounts = []
     
-    # SSH accounts
     try:
         result = subprocess.run(['awk', '-F:', '$3 >= 1000 && $1 != "nobody" {print $1}', '/etc/passwd'], 
                                capture_output=True, text=True)
@@ -1169,7 +1549,6 @@ async def get_user_accounts(user_id):
     except:
         pass
     
-    # XRAY accounts
     xray_config = "/etc/xray/config.json"
     if os.path.exists(xray_config):
         try:
@@ -1220,7 +1599,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except:
         pass
-
+        
 # ==========================================
 # FUNGSI PROSES CREATE AKUN
 # ==========================================
@@ -1234,6 +1613,16 @@ async def process_create_account(update: Update, context: ContextTypes.DEFAULT_T
     days = context.user_data.get('days')
     quota = DEFAULT_QUOTA
     iplimit = DEFAULT_IP_LIMIT
+    
+    can_create, stock_msg = check_stock_available()
+    if not can_create:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=stock_msg,
+            parse_mode='HTML'
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
     
     print("=" * 50)
     print("🔍 PROCESS CREATE ACCOUNT DIPANGGIL")
@@ -1526,12 +1915,15 @@ async def process_create_account(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 # ==========================================
-# HANDLER START
+# HANDLER START (DENGAN REGISTRASI USER & INFO REGION & STOK)
 # ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Tidak ada username"
     first_name = update.effective_user.first_name or "User"
+    last_name = update.effective_user.last_name or ""
+    
+    register_user(user_id, username, first_name, last_name)
     
     if context.user_data:
         context.user_data.clear()
@@ -1546,54 +1938,64 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balance = get_balance(user_id)
     await loading.delete()
     
+    # ========== AMBIL INFO REGION & STOK ==========
+    region = get_server_region()
+    stock_info = get_global_stock_info()
+    
+    if stock_info['available'] <= 5:
+        stok_status = f"⚠️ Sisa {stock_info['available']} akun"
+    elif stock_info['available'] <= 0:
+        stok_status = "❌ HABIS"
+    else:
+        stok_status = f"{stock_info['available']}"
+    
     welcome_text = (
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-		"     ≡    WaanStore | Auto Order    ≡\n"
-		"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"          ≡    WaanStore | Auto Order    ≡\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         
-        "✨ SELAMAT DATANG ✨\n\n"
+        f"✨ 𝐻𝑎𝑖𝑖𝑖... 𝑆𝐸𝐿𝐴𝑀𝐴𝑇 𝐷𝐴𝑇𝐴𝑁𝐺 ✨\n\n"
         
-        "┌─📋 Informasi Akun\n"
+        f"┌──📝 𝗜𝗡𝗙𝗢𝗥𝗠𝗔𝗦𝗜 𝗔𝗞𝗨𝗡\n"
+        f"│💳 Saldo Kamu: Rp {balance:,}\n"
         f"│👤 Nama: {first_name}\n"
         f"│🆔 ID: {user_id}\n"
-        f"│⏰ Waktu: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
-		"└─────────────────────\n\n"
+        f"└──────────────────────────\n\n"
         
-        "┌─📊 Statistik Bot\n"
+        f"┌──🚀 𝗜𝗡𝗙𝗢 𝗦𝗘𝗥𝗩𝗘𝗥\n"
+        f"│🌐 Region: {region}\n"
+        f"│📦 Stok Akun: {stok_status}\n"
+        f"│⏳ Waktu: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
         f"│👥 Pengunjung: {get_visitor_count()} orang\n"
-        f"│💰 Saldo: Rp {balance:,}\n"
-		"└─────────────────────\n\n"
+        f"└──────────────────────────\n\n"
         
-        "┌─🏆 Admin\n"
-        f"│☎ ️Kontak @WaanSuka_Turu\n"
-		f"│🔖 Channel @wnstore_vip\n"
-        "└─────────────────────\n\n"
+        f"┌──🛍️ 𝗛𝗔𝗥𝗚𝗔 𝗟𝗔𝗬𝗔𝗡𝗔𝗡 \n"
+        f"│🔰 Harian ( Rp{PRICES['ssh']} )\n"
+        f"│🔰 Mingguan ( Rp{PRICES['ssh']*7} )\n"
+        f"│🔰 Bulanan ( Rp{PRICES['ssh']*30} )\n"
+        f"└──────────────────────────\n"
+        f" Admin : @WaanSuka_Turu\n\n"
         
-        "Silakan pilih kategori di bawah:\n\n"
+        f"Silakan pilih kategori di bawah:\n\n"
     )
     
     keyboard = [
         [
-            InlineKeyboardButton("🚀 SSH", callback_data='proto_ssh'),
-            InlineKeyboardButton("🧩️️ VMess", callback_data='proto_vmess'),
+            InlineKeyboardButton("🚀 𝘽𝙪𝙖𝙩 𝙎𝙎𝙃", callback_data='proto_ssh'),
+            InlineKeyboardButton("🧩️️ 𝘽𝙪𝙖𝙩 𝙑𝙈𝙚𝙨𝙨", callback_data='proto_vmess'),
         ],
         [
-            InlineKeyboardButton("⚡ VLess", callback_data='proto_vless'),
-            InlineKeyboardButton("🫟️ Trojan", callback_data='proto_trojan'),
+            InlineKeyboardButton("⚡ 𝘽𝙪𝙖𝙩 𝙑𝙇𝙚𝙨𝙨", callback_data='proto_vless'),
+            InlineKeyboardButton("🫟️ 𝘽𝙪𝙖𝙩 𝙏𝙍𝙤𝙟𝙖𝙣", callback_data='proto_trojan'),
         ],
         [
-            InlineKeyboardButton("🛠️ Otomatis Perpanjang", callback_data='auto_renew_menu'),
-		],
-		[
-            InlineKeyboardButton("🔄 Perpanjang Manual", callback_data='renew_menu'),
+            InlineKeyboardButton("💳 𝙏𝙤𝙥𝙐𝙥 𝙎𝙖𝙡𝙙𝙤", callback_data='topup_saldo'),
         ],
         [
-            InlineKeyboardButton("🎁 Trial Menu", callback_data='trial_menu'),
-			InlineKeyboardButton("💳 TopUp", callback_data='topup_saldo'),
+            InlineKeyboardButton("🎁 𝙏𝙧𝙞𝙖𝙡 𝙈𝙚𝙣𝙪", callback_data='trial_menu'),
         ],
         [
-            InlineKeyboardButton("🛍️ Voucher", callback_data='voucher_menu'),
-            InlineKeyboardButton("📊 History", callback_data='cek_saldo'),
+            InlineKeyboardButton("🔵 𝙈𝙀𝙉𝙐 𝙇𝘼𝙄𝙉𝙔𝘼", callback_data='sub_menu_lainnya'),
         ],
     ]
     
@@ -1617,17 +2019,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     
     return PROTOKOL
+    
+# ==========================================
+# SUB MENU LAINNYA
+# ==========================================
+async def sub_menu_lainnya(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu Lainnya - berisi tombol-tombol yang dipindahkan"""
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [InlineKeyboardButton("🛠️ Otomatis Perpanjang", callback_data='auto_renew_menu')],
+        [InlineKeyboardButton("🔄 Perpanjang Manual", callback_data='renew_menu')],
+        [InlineKeyboardButton("📊 History / Cek Saldo", callback_data='cek_saldo')],
+        [InlineKeyboardButton("🛍️ Voucher", callback_data='voucher_menu')],
+        [InlineKeyboardButton("🔙 Kembali ke Menu Utama", callback_data='kembali_ke_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "📦 <b>MENU LAINNYA</b>\n\n"
+        "Silakan pilih opsi di bawah:",
+        parse_mode='HTML',
+        reply_markup=reply_markup
+    )
+    
+    return PROTOKOL
 
 # ==========================================
-# HANDLER AUTO RENEW (VERSI TOMBOL PROTOKOL)
-# ==========================================
-
-# ==========================================
-# HANDLER AUTO RENEW (LENGKAP)
-# ==========================================
-
-# ==========================================
-# HANDLER AUTO RENEW ON (UPDATE)
+# HANDLER AUTO RENEW
 # ==========================================
 async def auto_renew_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Aktifkan auto renew dan kembali ke menu"""
@@ -1642,19 +2062,15 @@ async def auto_renew_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Sesi expired. Silakan mulai ulang.")
         return PROTOKOL
     
-    # Aktifkan auto renew
     set_auto_renew(user_id, protocol, username, True)
     
-    # Ambil daftar auto renew aktif terbaru
     active_renews = get_active_auto_renew(user_id)
     
-    # Buat teks untuk list aktif
     active_text = "✅ <b>AUTO RENEW AKTIF:</b>\n"
     for p, u, d in active_renews:
         icon = get_protocol_icon(p)
         active_text += f"{icon} <code>{u}</code> ({p.upper()})\n"
     
-    # Keyboard untuk pilih protokol
     keyboard = [
         [
             InlineKeyboardButton("🚀 SSH", callback_data='auto_proto_ssh'),
@@ -1678,11 +2094,7 @@ async def auto_renew_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     return AUTO_RENEW_MENU
-	
-	
-# ==========================================
-# HANDLER AUTO RENEW OFF (UPDATE)
-# ==========================================
+
 async def auto_renew_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Nonaktifkan auto renew dan kembali ke menu"""
     query = update.callback_query
@@ -1696,13 +2108,10 @@ async def auto_renew_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Sesi expired. Silakan mulai ulang.")
         return PROTOKOL
     
-    # Nonaktifkan auto renew
     set_auto_renew(user_id, protocol, username, False)
     
-    # Ambil daftar auto renew aktif terbaru
     active_renews = get_active_auto_renew(user_id)
     
-    # Buat teks untuk list aktif
     if active_renews:
         active_text = "✅ <b>AUTO RENEW AKTIF:</b>\n"
         for p, u, d in active_renews:
@@ -1711,7 +2120,6 @@ async def auto_renew_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         active_text = "📭 <b>Belum ada akun dengan auto renew aktif</b>"
     
-    # Keyboard untuk pilih protokol
     keyboard = [
         [
             InlineKeyboardButton("🚀 SSH", callback_data='auto_proto_ssh'),
@@ -1736,9 +2144,6 @@ async def auto_renew_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return AUTO_RENEW_MENU
 
-# ==========================================
-# HANDLER AUTO RENEW MENU (DENGAN LIST AKTIF)
-# ==========================================
 async def auto_renew_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menu auto renew - tampilkan list aktif + pilih protokol"""
     query = update.callback_query
@@ -1746,10 +2151,8 @@ async def auto_renew_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     
-    # Ambil daftar auto renew aktif
     active_renews = get_active_auto_renew(user_id)
     
-    # Buat teks untuk list aktif
     active_text = ""
     if active_renews:
         active_text = "✅ <b>AUTO RENEW AKTIF:</b>\n"
@@ -1760,7 +2163,6 @@ async def auto_renew_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         active_text = "📭 <b>Belum ada akun dengan auto renew aktif</b>\n\n"
     
-    # Keyboard untuk pilih protokol
     keyboard = [
         [
             InlineKeyboardButton("🚀 SSH", callback_data='auto_proto_ssh'),
@@ -1770,7 +2172,7 @@ async def auto_renew_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📡 VLess", callback_data='auto_proto_vless'),
             InlineKeyboardButton("🛡️ Trojan", callback_data='auto_proto_trojan'),
         ],
-        [InlineKeyboardButton("🔙 Kembali", callback_data='kembali_ke_menu')]
+        [InlineKeyboardButton("🔙 Kembali", callback_data='sub_menu_lainnya')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1823,7 +2225,6 @@ async def auto_renew_process(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Sesi expired. Silakan mulai ulang.")
         return PROTOKOL
     
-    # Cek apakah user memiliki akun ini
     accounts = await get_user_accounts(user_id)
     user_accounts = [acc for acc in accounts if acc['protocol'] == protocol and acc['username'] == username]
     
@@ -1838,10 +2239,8 @@ async def auto_renew_process(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return AUTO_RENEW_USERNAME
     
-    # Simpan data
     context.user_data['auto_username'] = username
     
-    # Cek status auto renew
     status = get_auto_renew_status(user_id, protocol, username)
     
     keyboard = [
@@ -1866,7 +2265,7 @@ async def auto_renew_process(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     
     return AUTO_RENEW_SETTING
-
+    
 # ==========================================
 # HANDLER TRIAL
 # ==========================================
@@ -1902,7 +2301,6 @@ async def trial_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"         🎁 TRIAL GENERATOR       \n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📋 <b>KETENTUAN TRIAL</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1910,13 +2308,11 @@ async def trial_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Quota: {TRIAL_CONFIG['quota']} GB\n"
         f"• IP Limit: {TRIAL_CONFIG['iplimit']}\n"
         f"• Maks: {TRIAL_CONFIG['max_per_day']}x per hari\n\n"
-        
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>PENGGUNAAN TRIAL ANDA</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 Total: {used}/{max_trial} kali\n"
         f"⏰ Sisa: {remaining} kali\n\n"
-        
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Pilih protokol untuk trial:\n",
         parse_mode='HTML',
@@ -1926,7 +2322,7 @@ async def trial_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return TRIAL_MENU
 
 async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Buat trial otomatis dengan format seperti di gambar (TANPA TOMBOL)"""
+    """Buat trial otomatis"""
     query = update.callback_query
     await query.answer()
     
@@ -1934,6 +2330,11 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username_tele = update.effective_user.username or "Tidak ada username"
     first_name = update.effective_user.first_name or ""
+    
+    can_create, stock_msg = check_stock_available()
+    if not can_create:
+        await query.edit_message_text(stock_msg, parse_mode='HTML')
+        return TRIAL_MENU
     
     if not TRIAL_CONFIG['enabled']:
         await query.edit_message_text("❌ Trial sedang tidak tersedia.")
@@ -1967,15 +2368,12 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await call_script_async(script_path, args_list)
     
     if result.get('status') == 'success':
-        # PANGGIL FUNGSI SAVE TRIAL DENGAN FORMAT YANG BENAR
-        # PASTIKAN fungsi save_trial_account sudah menggunakan strftime, BUKAN isoformat!
         save_trial_account(username, protocol, password, hours=config['duration_hours'])
         
         used = await get_trial_count_today(user_id)
         remaining = config['max_per_day'] - used
         expired_time = (datetime.now() + timedelta(hours=config['duration_hours'])).strftime('%H:%M %d/%m/%Y')
         
-        # Kirim ke channel
         try:
             if username_tele != "Tidak ada username":
                 clean_user = username_tele.replace('@', '')
@@ -1996,7 +2394,7 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 Username: <code>{username}</code>\n"
                 f"⏰ Expired: {expired_time}\n"
                 f"📊 Sisa trial: {remaining}x\n"
-				f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
             
             channel_id = CHANNEL_ID
@@ -2011,13 +2409,11 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Gagal kirim notifikasi: {e}")
         
-        # ===== FORMAT SEPERTI DI GAMBAR (TANPA TOMBOL) =====
         if protocol == 'ssh':
             pesan = (
                 f"╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
                 f"┃     🎁 TRIAL SSH 1 JAM    ┃\n"
                 f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📋 <b>ACCOUNT DETAILS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2027,7 +2423,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💾 Quota    : {config['quota']} GB\n"
                 f"👥 Limit IP : {config['iplimit']}\n"
                 f"📅 Expired  : {expired_time}\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔌 <b>CONNECTION PORTS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2038,7 +2433,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔹 SSH UDP    : 1-65535\n"
                 f"🔹 DNS        : 53, 2222\n"
                 f"🔹 BadVPN     : 7100, 7300\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📌 <b>INFORMASI</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2052,7 +2446,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
                 f"┃   🎁 TRIAL VMESS 1 JAM    ┃\n"
                 f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📋 <b>ACCOUNT DETAILS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2062,7 +2455,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💾 <b>Quota</b> : {config['quota']} GB\n"
                 f"👥 <b>Limit IP</b> : {config['iplimit']}\n"
                 f"📅 <b>Expired</b> : {expired_time}\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔌 <b>CONNECTION INFO</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2074,21 +2466,15 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔹 <b>Network</b>    : ws\n"
                 f"🔹 <b>Path</b>       : {result.get('path', '/vmess')}\n"
                 f"🔹 <b>Service</b>    : {result.get('service_name', 'vmess-grpc')}\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔗 <b>LINKS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
             
-            # Tambahkan link TLS jika ada
             if result.get('link_tls'):
                 pesan += f"\n⚡ <b>TLS :</b>\n<code>{result['link_tls']}</code>\n"
-            
-            # Tambahkan link HTTP jika ada
             if result.get('link_http'):
                 pesan += f"\n⚡ <b>HTTP :</b>\n<code>{result['link_http']}</code>\n"
-            
-            # Tambahkan link gRPC jika ada
             if result.get('link_grpc'):
                 pesan += f"\n⚡ <b>gRPC :</b>\n<code>{result['link_grpc']}</code>\n"
             
@@ -2107,7 +2493,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
                 f"┃   🎁 TRIAL VLESS 1 JAM    ┃\n"
                 f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📋 <b>ACCOUNT DETAILS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2117,7 +2502,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💾 <b>Quota</b> : {config['quota']} GB\n"
                 f"👥 <b>Limit IP</b> : {config['iplimit']}\n"
                 f"📅 <b>Expired</b> : {expired_time}\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔌 <b>CONNECTION INFO</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2128,7 +2512,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔹 <b>Network</b>    : ws\n"
                 f"🔹 <b>Path</b>       : {result.get('path', '/vless')}\n"
                 f"🔹 <b>Service</b>    : {result.get('service_name', 'vless-grpc')}\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔗 <b>LINKS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2156,7 +2539,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"╭━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n"
                 f"┃   🎁 TRIAL TROJAN 1 JAM   ┃\n"
                 f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📋 <b>ACCOUNT DETAILS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2166,7 +2548,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💾 <b>Quota</b> : {config['quota']} GB\n"
                 f"👥 <b>Limit IP</b> : {config['iplimit']}\n"
                 f"📅 <b>Expired</b> : {expired_time}\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔌 <b>CONNECTION INFO</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2174,7 +2555,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔹 <b>Port gRPC</b>  : {result.get('port_grpc', '443')}\n"
                 f"🔹 <b>Path</b>       : {result.get('path', '/trojan-ws')}\n"
                 f"🔹 <b>Service</b>    : {result.get('service_name', 'trojan-grpc')}\n\n"
-                
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔗 <b>LINKS</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2195,7 +2575,6 @@ async def auto_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
         
-        # KIRIM PESAN TANPA TOMBOL
         await query.edit_message_text(pesan, parse_mode='HTML')
         
     else:
@@ -2299,7 +2678,7 @@ async def renew_input_username(update: Update, context: ContextTypes.DEFAULT_TYP
     
     await show_renew_days_table(update, context, username, protocol)
     return RENEW_DAYS
-
+    
 async def show_renew_days_table(update: Update, context: ContextTypes.DEFAULT_TYPE, username, protocol):
     """Tabel pilih hari untuk renew"""
     
@@ -2686,7 +3065,7 @@ async def input_nominal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Masukkan angka yang valid!")
         return TOPUP_NOMINAL
-
+        
 async def terima_bukti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "no_username"
@@ -2780,7 +3159,6 @@ async def approve_topup_owner(update: Update, context: ContextTypes.DEFAULT_TYPE
     except:
         pass
     
-    # Kirim notifikasi ke channel
     try:
         sensor_uid = str(user_id)[:2] + "*" * (len(str(user_id))-2)
         user_display = f"ID:{sensor_uid}"
@@ -2841,7 +3219,7 @@ async def reject_topup_owner(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
 
 # ==========================================
-# HANDLER MENU VOUCHER (UPDATE)
+# HANDLER MENU VOUCHER
 # ==========================================
 async def voucher_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2857,7 +3235,10 @@ async def voucher_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_owner:
         keyboard.insert(0, [InlineKeyboardButton("✨ Generate Voucher", callback_data='voucher_generate')])
         keyboard.insert(1, [InlineKeyboardButton("⚙️ Reset Saldo User", callback_data='reset_saldo_menu')])
+        keyboard.insert(2, [InlineKeyboardButton("📢 Broadcast Message", callback_data='broadcast_menu')])
+        keyboard.insert(3, [InlineKeyboardButton("📦 Manajemen Stok", callback_data='stock_menu')])
         keyboard.append([InlineKeyboardButton("📋 Daftar Voucher", callback_data='voucher_list')])
+        keyboard.append([InlineKeyboardButton("💰 Edit Harga", callback_data='edit_harga_menu')])
     
     keyboard.append([InlineKeyboardButton("🔙 Kembali", callback_data='kembali_ke_menu')])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2870,6 +3251,9 @@ async def voucher_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return VOUCHER_MENU
 
+# ==========================================
+# HANDLER VOUCHER GENERATE
+# ==========================================
 async def voucher_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3048,7 +3432,7 @@ async def user_limit_confirm_callback(update: Update, context: ContextTypes.DEFA
     )
     
     return VOUCHER_GENERATE_EXPIRE
-
+    
 async def voucher_generate_expire(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3085,6 +3469,43 @@ async def voucher_generate_expire(update: Update, context: ContextTypes.DEFAULT_
     context.user_data.clear()
     return PROTOKOL
 
+async def user_limit_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['selected_user_limit'] = []
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("1️⃣", callback_data='ulimit_1'),
+            InlineKeyboardButton("2️⃣", callback_data='ulimit_2'),
+            InlineKeyboardButton("3️⃣", callback_data='ulimit_3'),
+            InlineKeyboardButton("4️⃣", callback_data='ulimit_4'),
+            InlineKeyboardButton("5️⃣", callback_data='ulimit_5'),
+        ],
+        [
+            InlineKeyboardButton("6️⃣", callback_data='ulimit_6'),
+            InlineKeyboardButton("7️⃣", callback_data='ulimit_7'),
+            InlineKeyboardButton("8️⃣", callback_data='ulimit_8'),
+            InlineKeyboardButton("9️⃣", callback_data='ulimit_9'),
+            InlineKeyboardButton("0️⃣", callback_data='ulimit_0'),
+        ],
+        [
+            InlineKeyboardButton("✅ Konfirmasi", callback_data='ulimit_confirm'),
+            InlineKeyboardButton("🔄 Reset", callback_data='ulimit_reset'),
+        ],
+        [InlineKeyboardButton("❌ Batal", callback_data='voucher_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"👥 <b>ATUR JUMLAH USER</b>\n\n"
+        f"📌 Angka dipilih: • Belum ada\n"
+        f"👥 Total user: <b>0 user</b>",
+        parse_mode='HTML',
+        reply_markup=reply_markup
+    )
+    return VOUCHER_GENERATE_LIMIT
+
 async def voucher_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
@@ -3119,6 +3540,12 @@ async def voucher_redeem_process(update: Update, context: ContextTypes.DEFAULT_T
         )
     
     elif result['type'] in ['ssh', 'vmess', 'vless', 'trojan']:
+    
+        can_create, stock_msg = check_stock_available()
+        if not can_create:
+            await update.message.reply_text(stock_msg, parse_mode='HTML')
+            return ConversationHandler.END
+      
         context.user_data['selected_protocol'] = result['type']
         context.user_data['days'] = result['value']
         context.user_data['voucher_redeem'] = True
@@ -3300,7 +3727,207 @@ async def reset_saldo_all_yes(update: Update, context: ContextTypes.DEFAULT_TYPE
     return PROTOKOL
 
 # ==========================================
-# HANDLER KEMBALI KE MENU
+# HANDLER STOK UNTUK OWNER
+# ==========================================
+async def stock_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu manajemen stok - hanya untuk owner"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return VOUCHER_MENU
+    
+    stock_info = get_global_stock_info()
+    
+    text = (
+        f"📦 <b>MANAJEMEN STOK AKUN</b>\n\n"
+        f"📊 Status Saat Ini:\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 Maksimal Stok: <b>{stock_info['max']}</b> akun\n"
+        f"📉 Stok Terpakai: <b>{stock_info['current']}</b> akun\n"
+        f"✅ Stok Tersedia: <b>{stock_info['available']}</b> akun\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚠️ Stok ini berlaku untuk SEMUA protokol\n"
+        f"(SSH, VMess, VLess, Trojan)\n\n"
+        f"Pilih aksi di bawah:"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Tambah Stok", callback_data='stock_add')],
+        [InlineKeyboardButton("➖ Kurangi Stok", callback_data='stock_remove')],
+        [InlineKeyboardButton("🔢 Set Stok Manual", callback_data='stock_set')],
+        [InlineKeyboardButton("🔄 Update & Hitung Ulang", callback_data='stock_refresh')],
+        [InlineKeyboardButton("🔙 Kembali", callback_data='voucher_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    return STOCK_MENU
+
+async def stock_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tambah stok"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "➕ <b>TAMBAH STOK</b>\n\n"
+        "Masukkan jumlah stok yang ingin ditambahkan:\n"
+        "Contoh: <code>10</code> (menambah 10 stok)\n\n"
+        "Ketik /batal untuk membatalkan.",
+        parse_mode='HTML'
+    )
+    return STOCK_INPUT_ADD
+
+async def stock_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kurangi stok"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "➖ <b>KURANGI STOK</b>\n\n"
+        "Masukkan jumlah stok yang ingin dikurangi:\n"
+        "Contoh: <code>5</code> (mengurangi 5 stok)\n\n"
+        "Ketik /batal untuk membatalkan.",
+        parse_mode='HTML'
+    )
+    return STOCK_INPUT_REMOVE
+
+async def stock_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set stok manual"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "🔢 <b>SET STOK MANUAL</b>\n\n"
+        "Masukkan jumlah MAKSIMAL stok yang diinginkan:\n"
+        "Contoh: <code>200</code> (mengatur maksimal stok menjadi 200)\n\n"
+        "Ketik /batal untuk membatalkan.",
+        parse_mode='HTML'
+    )
+    return STOCK_INPUT_SET
+
+async def stock_process_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Proses tambah stok"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return ConversationHandler.END
+    
+    try:
+        amount = int(update.message.text.strip())
+        if amount <= 0:
+            await update.message.reply_text("❌ Masukkan angka positif!")
+            return STOCK_INPUT_ADD
+        
+        current_max = get_max_stock()
+        new_max = current_max + amount
+        update_max_stock(new_max)
+        
+        stock_info = get_global_stock_info()
+        await update.message.reply_text(
+            f"✅ <b>STOK BERHASIL DITAMBAH!</b>\n\n"
+            f"➕ Ditambah: +{amount} akun\n"
+            f"📈 Maksimal Stok Baru: <b>{new_max}</b> akun\n"
+            f"✅ Stok Tersedia: <b>{stock_info['available']}</b> akun",
+            parse_mode='HTML'
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Masukkan angka yang valid!")
+        return STOCK_INPUT_ADD
+    
+    await stock_menu(update, context)
+    return STOCK_MENU
+
+async def stock_process_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Proses kurangi stok"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return ConversationHandler.END
+    
+    try:
+        amount = int(update.message.text.strip())
+        if amount <= 0:
+            await update.message.reply_text("❌ Masukkan angka positif!")
+            return STOCK_INPUT_REMOVE
+        
+        current_max = get_max_stock()
+        new_max = current_max - amount
+        
+        if new_max < 0:
+            await update.message.reply_text("❌ Stok tidak bisa kurang dari 0!")
+            return STOCK_INPUT_REMOVE
+        
+        update_max_stock(new_max)
+        
+        stock_info = get_global_stock_info()
+        await update.message.reply_text(
+            f"✅ <b>STOK BERHASIL DIKURANGI!</b>\n\n"
+            f"➖ Dikurangi: -{amount} akun\n"
+            f"📈 Maksimal Stok Baru: <b>{new_max}</b> akun\n"
+            f"✅ Stok Tersedia: <b>{stock_info['available']}</b> akun",
+            parse_mode='HTML'
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Masukkan angka yang valid!")
+        return STOCK_INPUT_REMOVE
+    
+    await stock_menu(update, context)
+    return STOCK_MENU
+
+async def stock_process_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Proses set stok manual"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return ConversationHandler.END
+    
+    try:
+        new_max = int(update.message.text.strip())
+        if new_max < 0:
+            await update.message.reply_text("❌ Stok tidak bisa kurang dari 0!")
+            return STOCK_INPUT_SET
+        
+        update_max_stock(new_max)
+        
+        stock_info = get_global_stock_info()
+        await update.message.reply_text(
+            f"✅ <b>STOK BERHASIL DIUBAH!</b>\n\n"
+            f"📈 Maksimal Stok Baru: <b>{new_max}</b> akun\n"
+            f"📉 Stok Terpakai: <b>{stock_info['current']}</b> akun\n"
+            f"✅ Stok Tersedia: <b>{stock_info['available']}</b> akun",
+            parse_mode='HTML'
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Masukkan angka yang valid!")
+        return STOCK_INPUT_SET
+    
+    await stock_menu(update, context)
+    return STOCK_MENU
+
+async def stock_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Refresh/update stok (hitung ulang akun yang ada)"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != OWNER_ID:
+        await query.edit_message_text("❌ Hanya owner yang bisa akses fitur ini!")
+        return VOUCHER_MENU
+    
+    current = count_all_accounts()
+    max_stock = get_max_stock()
+    
+    text = (
+        f"🔄 <b>STOK TELAH DIREFRESH!</b>\n\n"
+        f"📊 Total akun terdeteksi: <b>{current}</b> akun\n"
+        f"📈 Maksimal Stok: <b>{max_stock}</b> akun\n"
+        f"✅ Stok Tersedia: <b>{max_stock - current}</b> akun"
+    )
+    
+    await query.edit_message_text(text, parse_mode='HTML')
+    await stock_menu(update, context)
+    return STOCK_MENU
+
+# ==========================================
+# HANDLER KEMBALI KE MENU & BATAL
 # ==========================================
 async def kembali_ke_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -3313,9 +3940,6 @@ async def kembali_ke_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error: {e}")
         return PROTOKOL
 
-# ==========================================
-# HANDLER TOMBOL BATAL
-# ==========================================
 async def batal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
@@ -3327,157 +3951,22 @@ async def batal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         return PROTOKOL
 
-# ==========================================
-# HANDLER TOMBOL PROTOKOL
-# ==========================================
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buat_lagi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    data = query.data
-    
-    if data == 'proto_batal':
-        return await batal_callback(update, context)
-    
-    if data == 'cek_saldo':
-        return await cek_saldo(update, context)
-    
-    if data == 'topup_saldo':
-        return await topup_saldo(update, context)
-    
-    if data == 'kembali_ke_menu':
-        return await kembali_ke_menu(update, context)
-    
-    if data == 'voucher_menu':
-        return await voucher_menu(update, context)
-    
-    if data == 'voucher_redeem':
-        return await voucher_redeem(update, context)
-    
-    if data == 'voucher_generate':
-        return await voucher_generate(update, context)
-    
-    if data == 'voucher_list':
-        return await voucher_list(update, context)
-    
-    if data == 'reset_saldo_menu':
-        return await reset_saldo_menu(update, context)
-    
-    if data == 'reset_saldo_input':
-        return await reset_saldo_input(update, context)
-    
-    if data == 'reset_saldo_list':
-        return await reset_saldo_list(update, context)
-    
-    if data == 'reset_saldo_all_confirm':
-        return await reset_saldo_all_confirm(update, context)
-    
-    if data == 'reset_saldo_all_yes':
-        return await reset_saldo_all_yes(update, context)
-    
-    if data == 'renew_menu':
-        return await renew_account_menu(update, context)
-		
-    if data.startswith('renew_proto_'):
-        return await renew_select_protocol(update, context)
-    
-    if data.startswith('renew_') and data not in ['renew_menu', 'renew_confirm']:
-        return await renew_select_days(update, context)
-    
-    if data == 'renew_confirm':
-        return await renew_confirm_callback(update, context)
-    
-    if data.startswith('rnum_'):
-        if data == 'rnum_reset':
-            return await renew_reset_callback(update, context)
-        else:
-            return await renew_number_callback(update, context)
-    
-    if data.startswith('gen_'):
-        return await voucher_generate_type(update, context)
-    
-    if data.startswith('ulimit_'):
-        if data == 'ulimit_confirm':
-            return await user_limit_confirm_callback(update, context)
-        elif data == 'ulimit_reset':
-            return await user_limit_reset_callback(update, context)
-        else:
-            return await user_limit_number_callback(update, context)
-    
-    if data.startswith('expire_'):
-        return await voucher_generate_expire(update, context)
-    
-    if data == 'finish_voucher':
-        return await voucher_generate_finish(update, context)
-    
-    if data.startswith('approve_'):
-        return await approve_topup_owner(update, context)
-    
-    if data.startswith('reject_'):
-        return await reject_topup_owner(update, context)
-    
-    if data.startswith('auto_trial_'):
-        return await auto_trial(update, context)
-		
-    if data.startswith('auto_proto_'):
-        return await auto_renew_proto(update, context)
-    
-    if data == 'auto_renew_menu':
-        return await auto_renew_menu(update, context)
-    
-    if data == 'auto_renew_on':
-        return await auto_renew_on(update, context)
-    
-    if data == 'auto_renew_off':
-        return await auto_renew_off(update, context)
-    
-    if data == 'trial_menu':
-        return await trial_menu(update, context)
-    
-    if data == 'buat_lagi':
-        return await buat_lagi(update, context)
-    
-    if data.startswith('proto_'):
-        protocol = data.replace('proto_', '')
-        context.user_data['selected_protocol'] = protocol
-        
-        proto_names = {
-            'ssh': '🚀 SSH',
-            'vmess': '📡 VMess',
-            'vless': '📡 VLess',
-            'trojan': '🛡️ Trojan'
-        }
-        
-        keyboard = [[InlineKeyboardButton("❌ Batal", callback_data='proto_batal')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        step_text = "Langkah 1/3" if protocol == 'ssh' else "Langkah 1/2"
-        detail = "• Password isi bebas nanti" if protocol == 'ssh' else "• Password otomatis"
-        
-        await query.edit_message_text(
-            f"✅ <b>{proto_names[protocol]}</b>\n"
-            f"💰 Harga: Rp {PRICES[protocol]:,}/hari\n\n"
-            f"📝 {step_text}: Masukkan <b>Username</b>\n"
-            f"• Hanya huruf, angka, underscore\n"
-            f"• Contoh: <code>myname_90</code>\n"
-            f"{detail}",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        
-        return INPUT_USERNAME
-    
+    context.user_data.clear()
+    await start(update, context)
     return PROTOKOL
 
 # ==========================================
-# HANDLER INPUT USERNAME & PASSWORD
+# HANDLER INPUT USERNAME & PASSWORD & DAYS
 # ==========================================
 async def input_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.text.strip()
     protocol = context.user_data.get('selected_protocol')
     
     if not validate_username(username):
-        await update.message.reply_text("❌ Username tidak valid!")
+        await update.message.reply_text("❌ Username tidak valid! (hanya huruf, angka, underscore)")
         return INPUT_USERNAME
     
     context.user_data['username'] = username
@@ -3500,11 +3989,11 @@ async def input_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     password = update.message.text.strip()
     
     if len(password) < 3:
-        await update.message.reply_text("❌ Password terlalu pendek!")
+        await update.message.reply_text("❌ Password minimal 3 karakter!")
         return INPUT_PASSWORD
     
     if ' ' in password:
-        await update.message.reply_text("❌ Password tidak boleh spasi!")
+        await update.message.reply_text("❌ Password tidak boleh mengandung spasi!")
         return INPUT_PASSWORD
     
     context.user_data['password'] = password
@@ -3544,9 +4033,9 @@ async def show_days_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("✅ Konfirmasi", callback_data='days_confirm'),
         ],
-		[
-			InlineKeyboardButton("🔄 Reset", callback_data='days_reset'),
-		],
+        [
+            InlineKeyboardButton("🔄 Reset", callback_data='days_reset'),
+        ],
         [InlineKeyboardButton("❌ Batal", callback_data='proto_batal')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3601,9 +4090,9 @@ async def days_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         [
             InlineKeyboardButton("✅ Konfirmasi", callback_data='days_confirm'),
         ],
-		[
-		    InlineKeyboardButton("🔄 Reset", callback_data='days_reset'),
-		],
+        [
+            InlineKeyboardButton("🔄 Reset", callback_data='days_reset'),
+        ],
         [InlineKeyboardButton("❌ Batal", callback_data='proto_batal')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3640,9 +4129,9 @@ async def days_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         [
             InlineKeyboardButton("✅ Konfirmasi", callback_data='days_confirm'),
         ],
-		[
-			InlineKeyboardButton("🔄 Reset", callback_data='days_reset'),
-		],
+        [
+            InlineKeyboardButton("🔄 Reset", callback_data='days_reset'),
+        ],
         [InlineKeyboardButton("❌ Batal", callback_data='proto_batal')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3674,13 +4163,9 @@ async def days_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await process_create_account(update, context, skip_balance=False)
     return ConversationHandler.END
 
-async def buat_lagi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.clear()
-    await start(update, context)
-    return PROTOKOL
-
+# ==========================================
+# COMMAND HANDLER
+# ==========================================
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     status_text = "<b>📊 STATUS BOT</b>\n\n"
@@ -3696,8 +4181,62 @@ async def saldo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     balance = get_balance(user_id)
     await update.message.reply_text(f"💰 <b>SALDO ANDA</b>\n\nUser ID: <code>{user_id}</code>\nSaldo: <b>Rp {balance:,}</b>", parse_mode='HTML')
 
-async def user_limit_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return PROTOKOL
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command /broadcast - kirim pesan ke semua user"""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Hanya owner yang bisa menggunakan command ini!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📢 <b>CARA BROADCAST</b>\n\n"
+            "Kirim pesan ke semua user:\n"
+            "• <code>/broadcast pesan anda</code>\n\n"
+            "Atau gunakan menu Broadcast di Voucher Menu.",
+            parse_mode='HTML'
+        )
+        return
+    
+    message_text = ' '.join(context.args)
+    users = get_all_users()
+    
+    if not users:
+        await update.message.reply_text("❌ Belum ada user yang terdaftar!")
+        return
+    
+    progress_msg = await update.message.reply_text(f"⏱️ Memulai broadcast ke {len(users)} user...")
+    
+    success_count = 0
+    fail_count = 0
+    
+    for user_id, username, first_name in users:
+        try:
+            personalized_msg = message_text.replace("{name}", first_name or "User")
+            personalized_msg = personalized_msg.replace("{username}", username or "User")
+            
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=personalized_msg,
+                parse_mode='HTML'
+            )
+            success_count += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            fail_count += 1
+            print(f"❌ Gagal kirim ke {user_id}: {e}")
+    
+    await progress_msg.edit_text(
+        f"✅ <b>BROADCAST SELESAI!</b>\n\n"
+        f"📊 Total user: {len(users)}\n"
+        f"✅ Berhasil: {success_count}\n"
+        f"❌ Gagal: {fail_count}",
+        parse_mode='HTML'
+    )
+
+async def batal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Dibatalkan.")
+    context.user_data.clear()
+    return ConversationHandler.END
 
 async def voucher_generate_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PROTOKOL
@@ -3706,11 +4245,187 @@ async def voucher_generate_min_balance(update: Update, context: ContextTypes.DEF
     return PROTOKOL
 
 # ==========================================
-# MAIN
+# HANDLER TOMBOL PROTOKOL (BUTTON HANDLER LENGKAP)
+# ==========================================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == 'proto_batal':
+        return await batal_callback(update, context)
+    
+    if data == 'cek_saldo':
+        return await cek_saldo(update, context)
+    
+    if data == 'topup_saldo':
+        return await topup_saldo(update, context)
+    
+    if data == 'kembali_ke_menu':
+        return await kembali_ke_menu(update, context)
+    
+    if data == 'voucher_menu':
+        return await voucher_menu(update, context)
+    
+    if data == 'voucher_redeem':
+        return await voucher_redeem(update, context)
+    
+    if data == 'voucher_generate':
+        return await voucher_generate(update, context)
+    
+    if data == 'voucher_list':
+        return await voucher_list(update, context)
+    
+    if data == 'reset_saldo_menu':
+        return await reset_saldo_menu(update, context)
+    
+    if data == 'reset_saldo_input':
+        return await reset_saldo_input(update, context)
+    
+    if data == 'reset_saldo_list':
+        return await reset_saldo_list(update, context)
+    
+    if data == 'reset_saldo_all_confirm':
+        return await reset_saldo_all_confirm(update, context)
+    
+    if data == 'reset_saldo_all_yes':
+        return await reset_saldo_all_yes(update, context)
+    
+    if data == 'renew_menu':
+        return await renew_account_menu(update, context)
+    
+    if data.startswith('renew_proto_'):
+        return await renew_select_protocol(update, context)
+    
+    if data == 'renew_confirm':
+        return await renew_confirm_callback(update, context)
+    
+    if data.startswith('rnum_'):
+        if data == 'rnum_reset':
+            return await renew_reset_callback(update, context)
+        else:
+            return await renew_number_callback(update, context)
+    
+    if data.startswith('gen_'):
+        return await voucher_generate_type(update, context)
+    
+    if data.startswith('ulimit_'):
+        if data == 'ulimit_confirm':
+            return await user_limit_confirm_callback(update, context)
+        elif data == 'ulimit_reset':
+            return await user_limit_reset_callback(update, context)
+        else:
+            return await user_limit_number_callback(update, context)
+    
+    if data.startswith('expire_'):
+        return await voucher_generate_expire(update, context)
+    
+    if data == 'finish_voucher':
+        return await voucher_generate_finish(update, context)
+    
+    if data.startswith('approve_'):
+        return await approve_topup_owner(update, context)
+    
+    if data.startswith('reject_'):
+        return await reject_topup_owner(update, context)
+    
+    if data.startswith('auto_trial_'):
+        return await auto_trial(update, context)
+    
+    if data.startswith('auto_proto_'):
+        return await auto_renew_proto(update, context)
+    
+    if data == 'auto_renew_menu':
+        return await auto_renew_menu(update, context)
+    
+    if data == 'auto_renew_on':
+        return await auto_renew_on(update, context)
+    
+    if data == 'auto_renew_off':
+        return await auto_renew_off(update, context)
+    
+    if data == 'trial_menu':
+        return await trial_menu(update, context)
+    
+    if data == 'buat_lagi':
+        return await buat_lagi(update, context)
+    
+    if data == 'broadcast_menu':
+        return await broadcast_menu(update, context)
+    
+    if data == 'broadcast_text':
+        return await broadcast_text_start(update, context)
+    
+    if data == 'broadcast_photo':
+        return await broadcast_photo_start(update, context)
+    
+    if data == 'broadcast_list':
+        return await broadcast_list_users(update, context)
+    
+    if data == 'edit_harga_menu':
+        return await edit_harga_menu(update, context)
+    
+    if data == 'sub_menu_lainnya':
+        return await sub_menu_lainnya(update, context)
+    
+    if data == 'stock_menu':
+        return await stock_menu(update, context)
+    
+    if data == 'stock_add':
+        return await stock_add(update, context)
+    
+    if data == 'stock_remove':
+        return await stock_remove(update, context)
+    
+    if data == 'stock_set':
+        return await stock_set(update, context)
+    
+    if data == 'stock_refresh':
+        return await stock_refresh(update, context)
+    
+    if data.startswith('edit_harga_'):
+        return await edit_harga_pilih_protokol(update, context)
+    
+    if data.startswith('proto_'):
+        protocol = data.replace('proto_', '')
+        context.user_data['selected_protocol'] = protocol
+        
+        proto_names = {
+            'ssh': '🚀 SSH',
+            'vmess': '📡 VMess',
+            'vless': '📡 VLess',
+            'trojan': '🛡️ Trojan'
+        }
+        
+        keyboard = [[InlineKeyboardButton("❌ Batal", callback_data='proto_batal')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        step_text = "Langkah 1/3" if protocol == 'ssh' else "Langkah 1/2"
+        detail = "• Password isi bebas nanti" if protocol == 'ssh' else "• Password otomatis"
+        
+        await query.edit_message_text(
+            f"✅ <b>{proto_names[protocol]}</b>\n"
+            f"💰 Harga: Rp {PRICES[protocol]:,}/hari\n\n"
+            f"📝 {step_text}: Masukkan <b>Username</b>\n"
+            f"• Hanya huruf, angka, underscore\n"
+            f"• Contoh: <code>myname_90</code>\n"
+            f"{detail}",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        
+        return INPUT_USERNAME
+    
+    return PROTOKOL
+
+# ==========================================
+# MAIN FUNCTION
 # ==========================================
 def main():
     print("=" * 60)
-    print("🚀 BOT TUNNELING - FINAL COMPLETE VERSION")
+    print("🚀 BOT TUNNELING - COMPLETE VERSION")
+    print("📦 Fitur: Create, Renew, Trial, Voucher, Auto Renew, Topup QRIS, Log Channel, Broadcast, Region, Stock Management")
     print("=" * 60)
     print(f"Token: {TOKEN[:10]}...{TOKEN[-5:]}")
     print(f"Owner ID: {OWNER_ID}")
@@ -3721,6 +4436,8 @@ def main():
     init_voucher_db()
     init_trial_db()
     init_auto_renew_db()
+    init_user_db()
+    init_stock_db()
     init_log_file()
     
     os.makedirs("/etc/conf/topup_requests", exist_ok=True)
@@ -3737,6 +4454,12 @@ def main():
     
     app.add_handler(CallbackQueryHandler(approve_topup_owner, pattern='^approve_'))
     app.add_handler(CallbackQueryHandler(reject_topup_owner, pattern='^reject_'))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("saldo", saldo_command))
+    
+    # Handler untuk sub menu lainnya
+    app.add_handler(CallbackQueryHandler(sub_menu_lainnya, pattern='^sub_menu_lainnya$'))
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
@@ -3768,6 +4491,14 @@ def main():
                 CallbackQueryHandler(button_handler, pattern='^auto_renew_off$'),
                 CallbackQueryHandler(button_handler, pattern='^trial_menu$'),
                 CallbackQueryHandler(button_handler, pattern='^auto_trial_'),
+                CallbackQueryHandler(button_handler, pattern='^broadcast_menu$'),
+                CallbackQueryHandler(button_handler, pattern='^broadcast_text$'),
+                CallbackQueryHandler(button_handler, pattern='^broadcast_photo$'),
+                CallbackQueryHandler(button_handler, pattern='^broadcast_list$'),
+                CallbackQueryHandler(button_handler, pattern='^edit_harga_menu$'),
+                CallbackQueryHandler(button_handler, pattern='^edit_harga_'),
+                CallbackQueryHandler(button_handler, pattern='^stock_menu$'),
+                CallbackQueryHandler(button_handler, pattern='^stock_'),
                 CallbackQueryHandler(batal_callback, pattern='^proto_batal$'),
             ],
             INPUT_USERNAME: [
@@ -3803,6 +4534,9 @@ def main():
                 CallbackQueryHandler(button_handler, pattern='^voucher_redeem$'),
                 CallbackQueryHandler(button_handler, pattern='^voucher_list$'),
                 CallbackQueryHandler(button_handler, pattern='^reset_saldo_menu$'),
+                CallbackQueryHandler(button_handler, pattern='^broadcast_menu$'),
+                CallbackQueryHandler(button_handler, pattern='^edit_harga_menu$'),
+                CallbackQueryHandler(button_handler, pattern='^stock_menu$'),
                 CallbackQueryHandler(button_handler, pattern='^voucher_menu$'),
                 CallbackQueryHandler(kembali_ke_menu, pattern='^kembali_ke_menu$'),
                 CallbackQueryHandler(batal_callback, pattern='^proto_batal$'),
@@ -3882,7 +4616,7 @@ def main():
                 CallbackQueryHandler(kembali_ke_menu, pattern='^kembali_ke_menu$'),
                 CallbackQueryHandler(batal_callback, pattern='^proto_batal$'),
             ],
-			AUTO_RENEW_MENU: [
+            AUTO_RENEW_MENU: [
                 CallbackQueryHandler(button_handler, pattern='^auto_proto_'),
                 CallbackQueryHandler(kembali_ke_menu, pattern='^kembali_ke_menu$'),
                 CallbackQueryHandler(batal_callback, pattern='^proto_batal$'),
@@ -3898,6 +4632,44 @@ def main():
                 CallbackQueryHandler(auto_renew_menu, pattern='^auto_renew_menu$'),
                 CallbackQueryHandler(batal_callback, pattern='^proto_batal$'),
             ],
+            EDIT_HARGA_MENU: [
+                CallbackQueryHandler(button_handler, pattern='^edit_harga_'),
+                CallbackQueryHandler(button_handler, pattern='^voucher_menu$'),
+                CallbackQueryHandler(kembali_ke_menu, pattern='^kembali_ke_menu$'),
+            ],
+            EDIT_HARGA_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_harga_proses),
+                CallbackQueryHandler(edit_harga_menu, pattern='^edit_harga_menu$'),
+            ],
+            BROADCAST_MENU: [
+                CallbackQueryHandler(button_handler, pattern='^broadcast_text$'),
+                CallbackQueryHandler(button_handler, pattern='^broadcast_photo$'),
+                CallbackQueryHandler(button_handler, pattern='^broadcast_list$'),
+                CallbackQueryHandler(button_handler, pattern='^voucher_menu$'),
+                CallbackQueryHandler(kembali_ke_menu, pattern='^kembali_ke_menu$'),
+            ],
+            BROADCAST_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_process_text),
+                MessageHandler(filters.PHOTO, broadcast_process_photo),
+                CallbackQueryHandler(broadcast_menu, pattern='^broadcast_menu$'),
+                CallbackQueryHandler(batal_callback, pattern='^proto_batal$'),
+            ],
+            STOCK_MENU: [
+                CallbackQueryHandler(button_handler, pattern='^stock_'),
+                CallbackQueryHandler(voucher_menu, pattern='^voucher_menu$'),
+            ],
+            STOCK_INPUT_ADD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stock_process_add),
+                CallbackQueryHandler(stock_menu, pattern='^stock_menu$'),
+            ],
+            STOCK_INPUT_REMOVE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stock_process_remove),
+                CallbackQueryHandler(stock_menu, pattern='^stock_menu$'),
+            ],
+            STOCK_INPUT_SET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stock_process_set),
+                CallbackQueryHandler(stock_menu, pattern='^stock_menu$'),
+            ],
         },
         fallbacks=[
             CommandHandler('batal', batal),
@@ -3907,18 +4679,14 @@ def main():
     )
     
     app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("saldo", saldo_command))
     
     print("✅ Bot siap! Klik /start untuk memulai")
+    print("📢 Fitur Broadcast: /broadcast [pesan]")
+    print("🌍 Fitur Region & Stok Aktif")
+    print("📦 Manajemen Stok: Voucher Menu -> Manajemen Stok")
     print("=" * 60)
     
     app.run_polling(timeout=30, read_timeout=30)
-
-async def batal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Dibatalkan.")
-    context.user_data.clear()
-    return ConversationHandler.END
 
 if __name__ == "__main__":
     main()
