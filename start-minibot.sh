@@ -16,6 +16,9 @@ sleep 0.5
 wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/api-ssh.sh &>/dev/null
 sleep 0.5
 wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/file/server.sh &>/dev/null
+sleep 0.5
+wget https://raw.githubusercontent.com/xawn22/LITE-V.1/main/telegram/pakasir_core.py &>/dev/null
+
 
 # // script tahap 2
 
