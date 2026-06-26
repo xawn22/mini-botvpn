@@ -3050,7 +3050,6 @@ async def topup_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📝 Masukkan nominal topup (dalam Rupiah):\n"
             "Contoh: <code>10000</code>\n\n"
             "Minimal: Rp 1.000\n"
-            "Maksimal: Rp 1.000.000\n\n"
             "🎁 Bonus: <b>Rp 1.000</b> per transaksi\n"
             "⏰ QRIS Exp: <b>15 menit</b>\n\n"
             "Ketik angka langsung di chat ini",
