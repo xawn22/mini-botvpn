@@ -42,6 +42,10 @@ clear
 cd /etc/systemd/system/
 wget https://raw.githubusercontent.com/xawn22/mini-botvpn/main/mini-botvpn.service &>/dev/null
 cd
+touch /var/log/bot.log
+touch /var/log/bot-error.log
+chmod 666 /var/log/bot.log
+chmod 666 /var/log/bot-error.log
 
 # // package 
 sleep 0.1
