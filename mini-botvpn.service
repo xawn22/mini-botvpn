@@ -1,15 +1,28 @@
 [Unit]
 Description=Telegram Mini VPN Bot
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 WorkingDirectory=/etc/conf
 ExecStart=/usr/bin/python3 /etc/conf/main.py
 Restart=always
-RestartSec=10
+RestartSec=5
 User=root
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/bot.log
+StandardError=append:/var/log/bot-error.log
+
+Type=simple
+KillMode=process
+KillSignal=SIGINT
+TimeoutStopSec=30
+RestartPreventExitStatus=1 143
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
 
 [Install]
 WantedBy=multi-user.target
